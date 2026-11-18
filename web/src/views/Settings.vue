@@ -969,6 +969,152 @@
       </label>
     </section>
 
+    <section v-if="can('bot.manage')" class="settings-section" v-show="activeCategory === 'playback'">
+      <h2 class="section-title">语音控制</h2>
+      <p class="profile-section-hint">
+        唤醒词在本地检测。唤醒后，指令录音交给云端转写，LLM 根据转写结果选择播放动作。保存后立即生效。
+      </p>
+
+      <fieldset v-if="voiceControlLoaded" class="voice-control-fields" :disabled="voiceControlSaving">
+        <label class="profile-toggle behavior-toggle spotify-toggle">
+          <div class="profile-toggle-text">
+            <div class="profile-toggle-label">启用语音控制</div>
+            <div class="profile-toggle-hint">开启后，频道成员可以用语音点歌、暂停或切歌。</div>
+          </div>
+          <input v-model="voiceControlForm.enabled" type="checkbox" class="profile-toggle-switch" />
+        </label>
+
+        <div class="create-field-grid">
+          <div class="form-group">
+            <label for="vc-wake-word">中文唤醒词</label>
+            <input
+              id="vc-wake-word"
+              v-model="voiceControlForm.wakeWord"
+              class="input"
+              autocomplete="off"
+              placeholder="团子"
+            />
+            <p class="create-field-hint">默认「团子」，至少两个中文字符。</p>
+          </div>
+
+          <div class="form-group">
+            <label for="vc-kws-dir">本地模型路径（KWS）</label>
+            <input
+              id="vc-kws-dir"
+              v-model="voiceControlForm.kwsDir"
+              class="input"
+              autocomplete="off"
+            />
+            <p class="create-field-hint">本地唤醒词模型目录路径。</p>
+          </div>
+        </div>
+
+        <h3 class="subsection-title">语音识别（ASR）</h3>
+        <div class="create-field-grid">
+          <div class="form-group">
+            <label for="vc-asr-base-url">ASR 接口地址</label>
+            <input
+              id="vc-asr-base-url"
+              v-model="voiceControlForm.asrBaseUrl"
+              class="input"
+              autocomplete="off"
+              placeholder="https://api.openai.com/v1"
+            />
+          </div>
+
+          <div class="form-group">
+            <label for="vc-asr-model">ASR 模型</label>
+            <input
+              id="vc-asr-model"
+              v-model="voiceControlForm.asrModel"
+              class="input"
+              autocomplete="off"
+              placeholder="gpt-transcribe"
+            />
+          </div>
+
+          <div class="form-group create-field-wide">
+            <label for="vc-asr-api-key">
+              ASR API Key
+              <span class="spotify-secret-hint" :class="{ set: voiceControlHasAsrKey }">
+                {{ voiceControlHasAsrKey ? '已设置' : '未设置' }}
+              </span>
+            </label>
+            <input
+              id="vc-asr-api-key"
+              v-model="voiceControlForm.asrApiKey"
+              class="input"
+              type="password"
+              autocomplete="new-password"
+              placeholder="留空表示不修改已保存的 API Key"
+            />
+          </div>
+        </div>
+
+        <h3 class="subsection-title">意图解析（LLM）</h3>
+        <p class="create-field-hint">
+          LLM 接口地址留空时跟随 ASR 地址；若地址一致且未单独保存 LLM Key，将自动使用 ASR Key。更换服务商域名时，已保存的密钥需要重新填写新 Key。
+        </p>
+        <div class="create-field-grid">
+          <div class="form-group">
+            <label for="vc-llm-base-url">LLM 接口地址</label>
+            <input
+              id="vc-llm-base-url"
+              v-model="voiceControlForm.llmBaseUrl"
+              class="input"
+              autocomplete="off"
+              :placeholder="voiceControlForm.asrBaseUrl.trim() ? `留空跟随 ASR（${voiceControlForm.asrBaseUrl.trim()}）` : '留空则跟随 ASR 接口地址'"
+            />
+          </div>
+
+          <div class="form-group">
+            <label for="vc-llm-model">LLM 模型</label>
+            <input
+              id="vc-llm-model"
+              v-model="voiceControlForm.llmModel"
+              class="input"
+              autocomplete="off"
+              placeholder="gpt-4o-mini / Qwen/Qwen2.5-7B-Instruct"
+            />
+          </div>
+
+          <div class="form-group create-field-wide">
+            <label for="vc-llm-api-key">
+              LLM API Key
+              <span class="spotify-secret-hint" :class="{ set: voiceControlHasLlmKey }">
+                {{ voiceControlHasLlmKey ? '已设置' : '未设置' }}
+              </span>
+            </label>
+            <input
+              id="vc-llm-api-key"
+              v-model="voiceControlForm.llmApiKey"
+              class="input"
+              type="password"
+              autocomplete="new-password"
+              placeholder="留空表示不修改已保存的 API Key"
+            />
+          </div>
+        </div>
+
+        <div class="spotify-actions">
+          <button type="button" class="btn-primary" @click="saveVoiceControl">
+            {{ voiceControlSaving ? '保存中…' : '保存' }}
+          </button>
+        </div>
+      </fieldset>
+      <p v-else-if="!voiceControlMessage" class="create-field-hint" role="status">正在加载语音控制设置…</p>
+
+      <p
+        v-if="voiceControlMessage"
+        class="spotify-message"
+        :class="`tone-${voiceControlMessageTone}`"
+        :role="voiceControlMessageTone === 'warn' ? 'alert' : 'status'"
+        :aria-live="voiceControlMessageTone === 'warn' ? 'assertive' : 'polite'"
+      >
+        {{ voiceControlMessage }}
+      </p>
+    </section>
+
     <!-- Guest Mode (admin only) -->
     <section v-if="session.isAdmin.value" class="settings-section" v-show="activeCategory === 'access'">
       <h2 class="section-title">游客模式</h2>
@@ -1943,6 +2089,75 @@ async function savePlayKeepsQueue() {
   } catch { /* ignore */ }
 }
 
+interface VoiceControlSettings {
+  enabled: boolean;
+  wakeWord: string;
+  kwsDir: string;
+  asrBaseUrl: string;
+  asrModel: string;
+  llmBaseUrl: string;
+  llmModel: string;
+  hasAsrApiKey: boolean;
+  hasLlmApiKey: boolean;
+}
+
+const voiceControlForm = reactive({
+  enabled: false,
+  wakeWord: '',
+  kwsDir: '',
+  asrBaseUrl: '',
+  asrModel: '',
+  asrApiKey: '',
+  llmBaseUrl: '',
+  llmModel: '',
+  llmApiKey: '',
+});
+const voiceControlHasAsrKey = ref(false);
+const voiceControlHasLlmKey = ref(false);
+const voiceControlLoaded = ref(false);
+const voiceControlSaving = ref(false);
+const voiceControlMessage = ref('');
+const voiceControlMessageTone = ref<'ok' | 'warn'>('ok');
+
+function applyVoiceControlConfig({ hasAsrApiKey, hasLlmApiKey, ...settings }: VoiceControlSettings) {
+  Object.assign(voiceControlForm, settings, { asrApiKey: '', llmApiKey: '' });
+  voiceControlHasAsrKey.value = hasAsrApiKey;
+  voiceControlHasLlmKey.value = hasLlmApiKey;
+  voiceControlLoaded.value = true;
+}
+
+async function loadVoiceControl() {
+  try {
+    const res = await axios.get<VoiceControlSettings>('/api/bot/settings/voice-control');
+    applyVoiceControlConfig(res.data);
+  } catch (err: any) {
+    voiceControlMessageTone.value = 'warn';
+    voiceControlMessage.value = err?.response?.data?.error ?? '加载语音控制设置失败';
+  }
+}
+
+async function saveVoiceControl() {
+  if (voiceControlSaving.value) return;
+  voiceControlSaving.value = true;
+  voiceControlMessage.value = '';
+  try {
+    const { asrApiKey, llmApiKey, ...settings } = voiceControlForm;
+    const res = await axios.post<VoiceControlSettings>('/api/bot/settings/voice-control', {
+      ...settings,
+      asrApiKey: asrApiKey.trim() || undefined,
+      llmApiKey: llmApiKey.trim() || undefined,
+    });
+    applyVoiceControlConfig(res.data);
+    voiceControlMessageTone.value = 'ok';
+    voiceControlMessage.value = '已保存';
+  } catch (err: any) {
+    voiceControlMessageTone.value = 'warn';
+    voiceControlMessage.value = err?.response?.data?.error ?? '保存语音控制设置失败';
+  } finally {
+    voiceControlSaving.value = false;
+  }
+}
+
 // --- Spotify (Connect) settings (§8) ---
 // NOTE: This card's status comes ONLY from /api/spotify/status (playback OAuth
 // `authorized`). It is deliberately NOT wired to the player store's
@@ -2636,6 +2851,16 @@ function auditActionClass(action: string): string {
   return 'audit-action-ok';
 }
 
+watch(
+  () => can('bot.manage'),
+  (allowed) => {
+    if (allowed && !voiceControlLoaded.value) {
+      loadVoiceControl();
+    }
+  },
+  { immediate: true },
+);
+
 onMounted(() => {
   if (session.isGuest.value) return;
   store.fetchBots(); // Refresh bot status on page visit
@@ -3127,6 +3352,13 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+
+.voice-control-fields {
+  border: 0;
+  margin: 0;
+  min-inline-size: 0;
+  padding: 0;
 }
 
 .spotify-message {

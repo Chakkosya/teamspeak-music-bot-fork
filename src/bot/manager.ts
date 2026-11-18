@@ -16,6 +16,7 @@ import type { AvatarStore } from "../data/avatars.js";
 import type { PermissionStore } from "../data/permissions.js";
 import type { SpotifyOAuth } from "../music/spotify/spotify-oauth.js";
 import { ManagedVoiceClientRegistry } from "./managed-voice-clients.js";
+import { createVoiceAssistant, type VoiceAssistant } from "../voice/assistant.js";
 
 /**
  * Run bot.connect() with a hard deadline. If the handshake hangs (e.g. the
@@ -90,6 +91,7 @@ export class BotManager extends EventEmitter {
   private avatarStore: AvatarStore;
   private permissions: PermissionStore;
   private configPath: string;
+  private voiceAssistant?: VoiceAssistant;
 
   constructor(
     neteaseProvider: MusicProvider,
@@ -106,9 +108,14 @@ export class BotManager extends EventEmitter {
     spotifyProvider?: MusicProvider,
     spotifyDataDir?: string,
     spotifyOAuth?: SpotifyOAuth,
-    jellyfinProvider?: MusicProvider
+    jellyfinProvider?: MusicProvider,
   ) {
     super();
+    try {
+      this.voiceAssistant = createVoiceAssistant(config.voiceControl);
+    } catch (err) {
+      logger.warn({ err }, "Voice control could not start");
+    }
     this.neteaseProvider = neteaseProvider;
     this.qqProvider = qqProvider;
     this.bilibiliProvider = bilibiliProvider;
@@ -164,6 +171,7 @@ export class BotManager extends EventEmitter {
       logger: this.logger,
       avatarStore: this.avatarStore,
       managedVoiceClients: this.managedVoiceClients,
+      voiceAssistant: this.voiceAssistant,
       spotifyDataDir: this.spotifyDataDir,
       spotifyOAuth: this.spotifyOAuth,
     });
@@ -245,6 +253,11 @@ export class BotManager extends EventEmitter {
     return Array.from(this.bots.values());
   }
 
+  updateVoiceAssistant(assistant: VoiceAssistant | undefined): void {
+    this.voiceAssistant = assistant;
+    for (const bot of this.bots.values()) bot.updateVoiceAssistant(assistant);
+  }
+
   /** Local upload ids still referenced by any bot's queue. The local provider
    *  uses this to avoid deleting a file another queue/bot is still using. */
   getReferencedLocalSongIds(): Set<string> {
@@ -309,6 +322,7 @@ export class BotManager extends EventEmitter {
         logger: this.logger,
         avatarStore: this.avatarStore,
         managedVoiceClients: this.managedVoiceClients,
+        voiceAssistant: this.voiceAssistant,
         spotifyDataDir: this.spotifyDataDir,
         spotifyOAuth: this.spotifyOAuth,
       });
@@ -368,6 +382,7 @@ export class BotManager extends EventEmitter {
         logger: this.logger,
         avatarStore: this.avatarStore,
         managedVoiceClients: this.managedVoiceClients,
+        voiceAssistant: this.voiceAssistant,
         spotifyDataDir: this.spotifyDataDir,
         spotifyOAuth: this.spotifyOAuth,
       });

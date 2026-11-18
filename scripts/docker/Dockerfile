@@ -8,7 +8,7 @@ FROM node:22-slim AS builder
 
 # Install build tools for native modules (opus, better-sqlite3)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 make g++ && \
+    python3 make g++ bzip2 && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -29,6 +29,16 @@ RUN npm run build
 # so we don't need build tools in the production image.
 RUN rm -rf node_modules && npm ci --production && npm cache clean --force
 
+ARG KWS_MODEL=sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01
+ADD https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/${KWS_MODEL}.tar.bz2 /tmp/wake-model.tar.bz2
+RUN mkdir -p /opt/wake-model && \
+    tar -xjf /tmp/wake-model.tar.bz2 -C /opt/wake-model --strip-components=1 \
+      "${KWS_MODEL}/encoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx" \
+      "${KWS_MODEL}/decoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx" \
+      "${KWS_MODEL}/joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx" \
+      "${KWS_MODEL}/tokens.txt" "${KWS_MODEL}/README.md" && \
+    cp /usr/share/common-licenses/Apache-2.0 /opt/wake-model/LICENSE
+
 # --- Stage 2: Production image ---
 FROM node:22-slim
 
@@ -46,6 +56,8 @@ COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/web/dist ./web/dist
 COPY --from=builder /app/package*.json ./
 COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /opt/wake-model /opt/wake-model
+ENV VOICE_KWS_DIR=/opt/wake-model
 # package.json declares a `prestart` preflight, so `npm start` inside the
 # container needs this file. The image's own CMD calls node directly and never
 # goes through npm, but an interactive `docker exec ... npm start` would

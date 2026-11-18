@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { Client as SDKClient, type ResolvedAddr } from "@honeybbq/teamspeak-client";
+import { Client as SDKClient, type ClientInfo, type ClientMovedEvent, type ResolvedAddr, type VoiceData } from "@honeybbq/teamspeak-client";
 import { Resolver } from "@honeybbq/teamspeak-client/discovery";
 import { TS3Client, type TS3VoiceSendFailure } from "./client.js";
 import type { TrackingVoiceEndpointResolver } from "./voice-endpoint.js";
@@ -38,6 +38,29 @@ describe("TS3Client voice send failure lifecycle", () => {
     await vi.advanceTimersByTimeAsync(0);
     vi.restoreAllMocks();
     vi.useRealTimers();
+  });
+
+  it("forwards audio from speakers in the bot's channel without changing voice activity", async () => {
+    const on = vi.spyOn(SDKClient.prototype, "on");
+    await client.connect();
+    sdk = (client as unknown as Harness).client!;
+    vi.spyOn(sdk, "channelID").mockReturnValue(12n);
+    const enter = on.mock.calls.find(([event]) => event === "clientEnter")![1] as (info: ClientInfo) => void;
+    const move = on.mock.calls.find(([event]) => event === "clientMoved")![1] as (info: ClientMovedEvent) => void;
+    const receive = on.mock.calls.find(([event]) => event === "voiceData")![1] as (info: VoiceData) => void;
+    const frame = vi.fn();
+    const activity = vi.fn();
+    client.on("voiceFrame", frame);
+    client.on("voiceActivity", activity);
+
+    enter({ id: 7, nickname: "Speaker", uid: "speaker-uid", channelID: 12n, type: 0, serverGroups: [] });
+    const packet = { clientId: 7, codec: 4, data: new Uint8Array([1, 2]) };
+    receive(packet);
+    move({ id: 7, reasonID: 0, targetChannelID: 99n, invokerID: 7, invokerUID: "speaker-uid", invokerName: "Speaker" });
+    receive(packet);
+
+    expect(frame).toHaveBeenCalledExactlyOnceWith({ ...packet, clientUid: "speaker-uid", nickname: "Speaker" });
+    expect(activity).toHaveBeenCalledTimes(2);
   });
 
   it.each([false, true])("reports a sanitized first failure after earlier accepted send=%s without throwing", (acceptedFirst) => {

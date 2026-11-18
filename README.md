@@ -103,12 +103,10 @@ npm start
 
 ### 方式三：Docker 一键部署
 
-所有依赖已内置（Node.js、FFmpeg、Opus 编码器），无需安装任何额外软件。
+在已安装 Docker 的 Linux 主机上运行一条命令。镜像包含 Node.js、FFmpeg、Opus 和中文唤醒模型，数据存入 `tsmusicbot-data` 命名卷。
 
 ```bash
-git clone https://github.com/ZHANGTIANYAO1/teamspeak-music-bot.git
-cd teamspeak-music-bot/scripts/docker
-docker-compose up -d
+docker run -d --pull always --name tsmusicbot --network host --restart unless-stopped -v tsmusicbot-data:/app/data ghcr.io/chakkosya/teamspeak-music-bot-fork:latest
 ```
 
 打开浏览器访问 **http://localhost:3000**
@@ -123,11 +121,11 @@ docker-compose up -d
 
 ```bash
 docker logs -f tsmusicbot          # 查看日志
-docker-compose down                # 停止
-docker-compose up -d --build       # 代码更新后重新构建
+docker stop tsmusicbot             # 停止
+docker start tsmusicbot            # 启动
 ```
 
-如果 TS3 服务器在其他机器上，编辑 `docker-compose.yml`：
+也可以使用本仓库 `scripts/docker/docker-compose.yml`，执行 `docker compose up -d --pull always`。如果 TS3 服务器在其他机器上，可编辑 `docker-compose.yml` 使用端口映射：
 ```yaml
 # 将 network_mode: host 替换为：
 ports:
@@ -299,17 +297,13 @@ npm start
 
 ### Docker 用户
 
+用 Compose 部署的用户，在仓库目录运行：
+
 ```bash
-cd scripts/docker
-
-# 拉取最新代码
-git pull
-
-# 重新构建并启动（数据自动保留）
-docker-compose up -d --build
+git pull && docker compose -f scripts/docker/docker-compose.yml up -d --pull always
 ```
 
-> 数据（数据库、Cookie、日志）保存在 Docker 命名卷 `tsmusicbot-data` 中，更新不会丢失。
+用本页的 `docker run` 命令部署的用户，先 `docker pull ghcr.io/chakkosya/teamspeak-music-bot-fork:latest`，再 `docker rm -f tsmusicbot`，然后重跑部署命令。重建容器时继续挂载原来的命名卷，数据库和设置会保留。
 
 ### Linux systemd 用户
 
@@ -404,6 +398,23 @@ sudo systemctl start tsmusicbot
 > 命令前缀默认为 `!`，可在设置页面修改。支持别名：`!p` = `!play`，`!s` = `!skip`，`!n` = `!next`
 >
 > `!save` / `!load` / `!queues` 仅在管理员开启「保存/加载播放清单」后可用（默认关闭），未启用时回复「此功能未启用」。
+
+### TeamSpeak 语音控制
+
+在机器人所在频道说「团子，播放周杰伦的晴天」「团子，暂停一下」或「团子，下一首」。也可以先说「团子」，再在 4 秒内说出指令。机器人在本机检测唤醒词，只把唤醒后的指令音频发给云端转写。LLM 根据文字选择播放动作，机器人执行后在频道里回复结果。
+
+Docker 镜像已内置中文唤醒模型。源码部署时，将 [sherpa-onnx 中文唤醒模型](https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01.tar.bz2) 解压到项目 `data` 目录。
+
+在 WebUI 的 **设置 → 播放与音质 → 语音控制** 填写模型和凭证，启用并保存即可，运行中的机器人会立即应用设置。
+
+| 字段 | 填写说明 |
+| --- | --- |
+| 唤醒词 | 至少两个汉字，默认「团子」，直接填写中文。 |
+| 本地模型目录 | 机器人运行环境里的路径。Docker 使用内置模型，源码部署解压到 `data` 后也可使用默认值。 |
+| 转写服务地址、模型、API Key | 服务须支持 `POST /audio/transcriptions`。默认地址 `https://api.openai.com/v1`，模型 `gpt-transcribe`。 |
+| LLM 地址、模型、API Key | 填写支持工具调用的模型，服务须支持 `POST /chat/completions`。地址留空时沿用转写服务；地址相同且 LLM 密钥留空时沿用转写密钥。 |
+
+已保存的 API Key 不会回显。修改其他设置时留空即可保留；更换服务域名时，请重新填写对应服务的密钥。
 
 ### TeamSpeak 命令权限（管理类命令限制）
 
@@ -915,7 +926,7 @@ A：B站搜索需要 buvid3 匿名 Cookie（程序启动时自动获取）。如
 A：YouTube 是可选音源，需要手动安装 `yt-dlp`。详见 [可选：YouTube 音源](#可选youtube-音源) 章节。快速验证：在项目根目录执行 `bin/yt-dlp --version`（或系统 `yt-dlp --version`），能打印版本号即可。若 yt-dlp 已安装但仍搜索失败，通常是网络/地域问题或 yt-dlp 版本过旧（执行 `yt-dlp -U` 升级）。
 
 **Q：如何更新到新版本？**
-A：`git pull` 拉取最新代码，然后 `npm install && npm run build && npm start` 重新构建启动。Docker 用户执行 `docker-compose up -d --build`。
+A：源码部署执行 `git pull`，然后 `npm install && npm run build && npm start`。Docker 部署见 [Docker 用户](#docker-用户)。
 
 **Q：忘记管理员密码怎么办？**
 A：直接操作 SQLite 数据库。最简单的办法是清空 `users` 表然后重新进入 first-run 流程：`sqlite3 data/tsmusicbot.db "DELETE FROM users; DELETE FROM sessions;"`，重启后浏览器会自动跳转 `/first-run` 让你重新创建管理员。详细方法见 [从 WebUI 无鉴权版本升级](#从-webui-无鉴权版本升级重要)。

@@ -4,9 +4,12 @@ import {
   type TS3ClientOptions,
   type TS3TextMessage,
   type TS3VoiceActivity,
+  type TS3VoiceFrame,
   type TS3VoiceSendFailure,
 } from "../ts-protocol/client.js";
 import { AudioPlayer } from "../audio/player.js";
+import type { VoiceAssistant } from "../voice/assistant.js";
+import { VoiceSession } from "../voice/session.js";
 import { PlayQueue, PlayMode, type QueuedSong } from "../audio/queue.js";
 import type { MusicProvider, Platform, Song } from "../music/provider.js";
 import {
@@ -121,6 +124,7 @@ export interface BotInstanceOptions {
   avatarStore: AvatarStore;
   /** Shared across one manager so its bots do not trigger one another. */
   managedVoiceClients?: ManagedVoiceClientRegistry;
+  voiceAssistant?: VoiceAssistant;
   /** Base dir (under DATA_DIR) for per-bot go-librespot work/config trees. */
   spotifyDataDir?: string;
   /** Process-wide shared Spotify OAuth (single account); injected into the
@@ -161,6 +165,7 @@ export class BotInstance extends EventEmitter {
   private tsClient: TS3Client;
   private player: AudioPlayer;
   private voiceDucking: VoiceDuckingController;
+  private voiceSession?: VoiceSession;
   private managedVoiceClients: ManagedVoiceClientRegistry;
   private readonly configuredVoiceServerScope: ManagedVoiceClientScope;
   private voiceServerScope: ManagedVoiceClientScope;
@@ -231,6 +236,7 @@ export class BotInstance extends EventEmitter {
 
     this.tsClient = new TS3Client(options.tsOptions, this.logger);
     this.player = new AudioPlayer(this.logger);
+    this.updateVoiceAssistant(options.voiceAssistant);
     this.voiceDucking = new VoiceDuckingController(
       this.player,
       this.config.voiceDucking ?? { enabled: false, volumePercent: 30 },
@@ -456,6 +462,7 @@ export class BotInstance extends EventEmitter {
       this._cancelIdleTimer();
       this.unregisterManagedVoiceClient(MANAGED_VOICE_CLIENT_RELEASE_GRACE_MS);
       this.voiceDucking.reset(true);
+      this.voiceSession?.reset();
       // Cancel any pending live-queue snapshot BEFORE clearing the queue: a
       // debounced snapshot firing after clear() would persist an empty queue
       // (clearQueueState), wiping the state we want to restore on reconnect —
@@ -513,6 +520,7 @@ export class BotInstance extends EventEmitter {
     });
     this.tsClient.on("clientLeave", (event: { id: number }) => {
       this.voiceDucking.removeSpeaker(event.id);
+      this.voiceSession?.removeSpeaker(event.id);
       void this.refreshOccupancy();
     });
     this.tsClient.on("clientMoved", (event: { id: number; targetChannelID: bigint }) => {
@@ -520,6 +528,7 @@ export class BotInstance extends EventEmitter {
         // Moving the bot invalidates every activity deadline from its old
         // channel even if no individual leave events arrive.
         this.voiceDucking.reset(false);
+        this.voiceSession?.reset();
         // Carry the now-playing channel description over to the new
         // channel instead of leaving it stale in the old one (#159).
         this.profileManager.onChannelMoved(event.targetChannelID).catch((err) => {
@@ -527,10 +536,35 @@ export class BotInstance extends EventEmitter {
         });
       } else {
         this.voiceDucking.removeSpeaker(event.id);
+        this.voiceSession?.removeSpeaker(event.id);
       }
       void this.refreshOccupancy();
     });
   }
+
+  updateVoiceAssistant(assistant: VoiceAssistant | undefined): void {
+    if (this.voiceSession) {
+      this.tsClient.off("voiceFrame", this.receiveVoiceFrame);
+      this.voiceSession.reset();
+      this.voiceSession = undefined;
+    }
+    if (!assistant) return;
+    this.voiceSession = new VoiceSession(assistant.newWakeDetector, (speaker, pcm, signal) => {
+      void this.handleVoiceCommand(assistant, speaker, pcm, signal).catch(async (err) => {
+        if (signal.aborted) return;
+        this.logger.warn({ err }, "Voice command failed");
+        await this.tsClient.sendTextMessage("语音指令处理失败，请稍后重试。");
+      }).catch((err) => this.logger.warn({ err }, "Failed to send voice command reply"));
+    });
+    this.tsClient.on("voiceFrame", this.receiveVoiceFrame);
+  }
+
+  private receiveVoiceFrame = (frame: TS3VoiceFrame): void => {
+    if (!this.connected) return;
+    if (this.managedVoiceClients.hasClientUid(frame.clientUid) ||
+        this.managedVoiceClients.has(this.voiceServerScope, frame.clientId)) return;
+    this.voiceSession?.receive(frame);
+  };
 
   private registerManagedVoiceClient(): void {
     this.unregisterManagedVoiceClient();
@@ -648,6 +682,7 @@ export class BotInstance extends EventEmitter {
     this.lifecycleGeneration++;
     this._cancelIdleTimer();
     this.voiceDucking.reset(true);
+    this.voiceSession?.reset();
     // Cancel any pending live-queue snapshot before clearing so it can't fire
     // afterwards and persist an empty queue over the state we keep for restore
     // (#119). The disconnected handler cancels too, but do it here as well for
@@ -794,7 +829,7 @@ export class BotInstance extends EventEmitter {
     );
     if (!parsed) return;
 
-    if (!(await this.isCommandAllowed(parsed.name, msg))) {
+    if (!(await this.isCommandAllowed(parsed.name, msg.invokerId))) {
       this.logger.info(
         { command: parsed.name, invoker: msg.invokerName },
         "Command denied: invoker not in adminGroups"
@@ -833,6 +868,24 @@ export class BotInstance extends EventEmitter {
     }
   }
 
+  private async handleVoiceCommand(
+    assistant: VoiceAssistant,
+    speaker: Pick<TS3VoiceFrame, "clientId" | "nickname">,
+    pcm: Buffer,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const command = await assistant.interpret(pcm, signal);
+    if (!command || signal.aborted) return;
+    const allowed = await this.isCommandAllowed(command.name, String(speaker.clientId));
+    if (signal.aborted) return;
+    if (!allowed) {
+      await this.tsClient.sendTextMessage(COMMAND_DENIED_MESSAGE);
+      return;
+    }
+    const response = await this.executeCommand(command, undefined, speaker.nickname);
+    if (response && !signal.aborted) await this.tsClient.sendTextMessage(response);
+  }
+
   /**
    * Decide whether a chat command may run for this sender. Reads adminGroups
    * live from this.config. Public commands and the enforcement-off case are
@@ -842,7 +895,7 @@ export class BotInstance extends EventEmitter {
    * out-of-channel senders and stale after a live promotion/demotion. Fails
    * closed when the groups can't be determined.
    */
-  private async isCommandAllowed(commandName: string, msg: TS3TextMessage): Promise<boolean> {
+  private async isCommandAllowed(commandName: string, invokerId: string): Promise<boolean> {
     const adminGroups = this.config.adminGroups;
     // Public command, or enforcement off → allow without any lookup.
     // (canRunCommand with empty groups is true iff the command is public OR
@@ -850,7 +903,7 @@ export class BotInstance extends EventEmitter {
     if (canRunCommand(commandName, [], adminGroups)) return true;
     // Enforced admin command: authoritative decision uses freshly-resolved,
     // server-wide groups. Fail closed if they can't be determined.
-    const groups = await this.lookupInvokerGroups(msg.invokerId);
+    const groups = await this.lookupInvokerGroups(invokerId);
     return canRunCommand(commandName, groups, adminGroups);
   }
 

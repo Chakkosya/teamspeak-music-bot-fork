@@ -25,6 +25,7 @@ import {
   type ServerProtocol,
 } from "./protocol-detect.js";
 import { TS6HttpQuery } from "./http-query.js";
+import { CODEC_OPUS_MUSIC, CODEC_OPUS_VOICE } from "./voice.js";
 import {
   TrackingVoiceEndpointResolver,
   type ResolvedVoiceEndpoint,
@@ -71,13 +72,17 @@ export interface TS3TextMessage {
   invokerGroups: string[]; // sender's TS server-group ids; [] when not in view cache
 }
 
-/** Lightweight voice-packet signal used for activity detection. The encoded
- * payload is intentionally not forwarded beyond this protocol wrapper. */
+/** Lightweight voice-packet signal used for activity detection. */
 export interface TS3VoiceActivity {
   clientId: number;
   codec: number;
   /** Stable TeamSpeak identity when the sender is present in the client view. */
   clientUid?: string;
+}
+
+export interface TS3VoiceFrame extends TS3VoiceActivity {
+  nickname: string;
+  data: Uint8Array;
 }
 
 /** Send acceptance only: an accepted UDP call does not confirm delivery. */
@@ -295,6 +300,7 @@ export class TS3Client extends EventEmitter {
       this.emit("textMessage", toTS3TextMessage(msg));
     });
 
+    const voiceClients = new Map<number, ClientInfo>();
     sdkClient.on("voiceData", (voice: VoiceData) => {
       if (!isCurrent()) return;
       // The library normally suppresses our own packets; retain the explicit
@@ -307,6 +313,13 @@ export class TS3Client extends EventEmitter {
         ...(clientUid ? { clientUid } : {}),
       };
       this.emit("voiceActivity", activity);
+      if (this.listenerCount("voiceFrame") === 0 ||
+          (voice.codec !== CODEC_OPUS_VOICE && voice.codec !== CODEC_OPUS_MUSIC)) return;
+      const sender = voiceClients.get(voice.clientId);
+      if (sender && sender.channelID === sdkClient.channelID()) {
+        const frame: TS3VoiceFrame = { ...activity, nickname: sender.nickname, data: voice.data };
+        this.emit("voiceFrame", frame);
+      }
     });
 
     sdkClient.on("disconnected", (err) => {
@@ -323,6 +336,7 @@ export class TS3Client extends EventEmitter {
 
     sdkClient.on("clientEnter", (info: ClientInfo) => {
       if (!isCurrent()) return;
+      voiceClients.set(info.id, info);
       this.rememberVisibleClientUid(info.id, info.uid);
       this.logger.debug(
         { nickname: info.nickname, id: info.id },
@@ -333,6 +347,7 @@ export class TS3Client extends EventEmitter {
 
     sdkClient.on("clientLeave", (ev: ClientLeftViewEvent) => {
       if (!isCurrent()) return;
+      voiceClients.delete(ev.id);
       this.releaseVisibleClientUid(ev.id);
       this.logger.debug({ id: ev.id }, "Client left");
       this.emit("clientLeave", ev);
@@ -340,6 +355,8 @@ export class TS3Client extends EventEmitter {
 
     sdkClient.on("clientMoved", (ev: ClientMovedEvent) => {
       if (!isCurrent()) return;
+      const sender = voiceClients.get(ev.id);
+      if (sender) voiceClients.set(ev.id, { ...sender, channelID: ev.targetChannelID });
       this.logger.debug(
         { id: ev.id, targetChannelID: ev.targetChannelID.toString() },
         "Client moved"

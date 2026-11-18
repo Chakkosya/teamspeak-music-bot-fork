@@ -11,6 +11,18 @@ import { dirname } from "node:path";
 import type { BotAccess, GuestPermissions } from "./permissions.js";
 import { GUEST_PERMISSION_FLAGS } from "./permissions.js";
 
+export interface VoiceControlConfig {
+  enabled: boolean;
+  wakeWord: string;
+  kwsDir: string;
+  asrBaseUrl: string;
+  asrModel: string;
+  asrApiKey: string;
+  llmBaseUrl: string;
+  llmModel: string;
+  llmApiKey: string;
+}
+
 export interface GuestModeConfig {
   enabled: boolean;
   bots: BotAccess; // "all" | string[]
@@ -121,6 +133,7 @@ export interface BotConfig {
   autoPauseOnEmpty: boolean;
   /** Lower music volume while voice from another client is being received. */
   voiceDucking: VoiceDuckingConfig;
+  voiceControl: VoiceControlConfig;
   idleTimeoutMinutes: number;
   /** Enable uploading and playback of server-stored local audio files. */
   localAudioEnabled: boolean;
@@ -174,6 +187,17 @@ export function getDefaultConfig(): BotConfig {
     locale: "zh",
     theme: "dark",
     commandPrefix: "!",
+    voiceControl: {
+      enabled: false,
+      wakeWord: "团子",
+      kwsDir: process.env.VOICE_KWS_DIR ?? "data/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01",
+      asrBaseUrl: "https://api.openai.com/v1",
+      asrModel: "gpt-transcribe",
+      asrApiKey: "",
+      llmBaseUrl: "",
+      llmModel: "",
+      llmApiKey: "",
+    },
     commandAliases: { p: "play", s: "skip", n: "next" },
     neteaseApiPort: 3001,
     qqMusicApiPort: 3200,
@@ -458,6 +482,7 @@ export function loadConfig(path: string): BotConfig {
       savedQueuesEnabled,
       playKeepsQueue,
       voiceDucking,
+      voiceControl: { ...defaults.voiceControl, ...partial.voiceControl },
       defaultPlatform: defaultPlatformPref,
     };
   }

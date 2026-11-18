@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import express from "express";
 import cookieParser from "cookie-parser";
 import request from "supertest";
@@ -15,6 +15,7 @@ import { createPermissionStore } from "../../data/permissions.js";
 import { createBotRouter } from "./bot.js";
 import {
   getDefaultConfig,
+  loadConfig,
   type BotConfig,
   type JellyfinConfig,
   type VoiceDuckingConfig,
@@ -48,6 +49,7 @@ describe("bot router /settings", () => {
   let configPath: string;
   let tmpDir: string;
   let fakeBots: ReturnType<typeof makeFakeBot>[];
+  let updateVoiceAssistant: ReturnType<typeof vi.fn>;
 
   beforeEach(async () => {
     botDb = createDatabase(":memory:");
@@ -61,8 +63,10 @@ describe("bot router /settings", () => {
     config = { ...getDefaultConfig(), idleTimeoutMinutes: 15, autoPauseOnEmpty: true };
 
     fakeBots = [makeFakeBot(), makeFakeBot()];
+    updateVoiceAssistant = vi.fn();
     const fakeManager = {
       getAllBots: () => fakeBots,
+      updateVoiceAssistant,
     } as unknown as BotManager;
     const avatarStore = createAvatarStore(tmpDir);
 
@@ -97,6 +101,43 @@ describe("bot router /settings", () => {
     const res = await request(app).get("/api/bot/settings").set("Cookie", cookie);
     expect(res.status).toBe(200);
     expect(res.body.voiceDucking).toEqual({ enabled: false, volumePercent: 30 });
+  });
+
+  it("persists voice settings, applies them and keeps API keys write-only", async () => {
+    const endpoint = "/api/bot/settings/voice-control";
+    const first = await request(app).post(endpoint).set("Cookie", cookie).send({
+      wakeWord: "你好团子",
+      asrModel: "speech-model",
+      asrApiKey: "transcription-key",
+      llmModel: "command-model",
+      llmApiKey: "command-key",
+    });
+    expect(first.status).toBe(200);
+    expect(first.body).toMatchObject({ wakeWord: "你好团子", asrModel: "speech-model", hasAsrApiKey: true, hasLlmApiKey: true });
+    expect(first.body).not.toHaveProperty("asrApiKey");
+    expect(first.body).not.toHaveProperty("llmApiKey");
+    expect(updateVoiceAssistant).toHaveBeenCalledExactlyOnceWith(undefined);
+
+    const second = await request(app).post(endpoint).set("Cookie", cookie).send({ wakeWord: "团子团子" });
+    const loaded = await request(app).get(endpoint).set("Cookie", cookie);
+    expect(loaded.body).toEqual(second.body);
+    expect(loadConfig(configPath).voiceControl).toMatchObject({
+      wakeWord: "团子团子", asrApiKey: "transcription-key", llmApiKey: "command-key",
+    });
+  });
+
+  it("keeps the previous configuration when enabling with a missing local model", async () => {
+    const endpoint = "/api/bot/settings/voice-control";
+    const res = await request(app).post(endpoint).set("Cookie", cookie).send({
+      enabled: true,
+      kwsDir: join(tmpDir, "missing-model"),
+      llmModel: "command-model",
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("找不到唤醒模型");
+    expect(config.voiceControl).toEqual(getDefaultConfig().voiceControl);
+    expect(existsSync(configPath)).toBe(false);
+    expect(updateVoiceAssistant).not.toHaveBeenCalled();
   });
 
   it("POST /settings safely partial-merges, persists and hot-applies voiceDucking", async () => {

@@ -277,6 +277,38 @@ describe("BotInstance voice-ducking lifecycle integration", () => {
   });
 });
 
+describe("BotInstance voice commands", () => {
+  const { handleVoiceCommand, isCommandAllowed } = BotInstance.prototype as any;
+  const command = parseCommand("!next", "!")!;
+  const speaker = { clientId: 7, nickname: "频道成员" };
+
+  it("dispatches through the same player as a text command and replies with the result", async () => {
+    const bot = {
+      connected: true,
+      config: { adminGroups: [6] },
+      isCommandAllowed,
+      executeCommand: BotInstance.prototype.executeCommand,
+      cmdNext: vi.fn(async () => "已切换到下一首"),
+      tsClient: { sendTextMessage: vi.fn() },
+    };
+    const assistant = { interpret: vi.fn(async () => command) };
+    await handleVoiceCommand.call(bot, assistant, speaker, Buffer.alloc(640), new AbortController().signal);
+    expect(bot.cmdNext).toHaveBeenCalledOnce();
+    expect(bot.tsClient.sendTextMessage).toHaveBeenCalledExactlyOnceWith("已切换到下一首");
+  });
+
+  it("does not execute a tool response that arrives after its voice session was cancelled", async () => {
+    const pending = deferred<typeof command>();
+    const bot = { executeCommand: vi.fn() };
+    const signal = new AbortController();
+    const result = handleVoiceCommand.call(bot, { interpret: () => pending.promise }, speaker, Buffer.alloc(640), signal.signal);
+    signal.abort();
+    pending.resolve(command);
+    await result;
+    expect(bot.executeCommand).not.toHaveBeenCalled();
+  });
+});
+
 /** Minimal `this` carrying only what handleTextMessage's gate path touches.
  *  The gate methods live on the prototype and are attached here so calls like
  *  `this.isCommandAllowed(...)` resolve against this same object. */
