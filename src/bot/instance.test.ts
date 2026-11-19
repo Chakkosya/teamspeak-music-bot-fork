@@ -282,7 +282,7 @@ describe("BotInstance voice commands", () => {
   const command = parseCommand("!next", "!")!;
   const speaker = { clientId: 7, nickname: "频道成员" };
 
-  it("dispatches through the same player as a text command and replies with the result", async () => {
+  it("echoes the transcript, dispatches through the same player as a text command and replies with the result", async () => {
     const bot = {
       connected: true,
       config: { adminGroups: [6] },
@@ -290,20 +290,72 @@ describe("BotInstance voice commands", () => {
       executeCommand: BotInstance.prototype.executeCommand,
       cmdNext: vi.fn(async () => "已切换到下一首"),
       tsClient: { sendTextMessage: vi.fn() },
+      player: { playSpeech: vi.fn() },
     };
-    const assistant = { interpret: vi.fn(async () => command) };
-    await handleVoiceCommand.call(bot, assistant, speaker, Buffer.alloc(640), new AbortController().signal);
+    const audio = Buffer.alloc(3840);
+    const assistant = {
+      transcribe: vi.fn(async () => "下一首"),
+      reply: vi.fn(async () => ({ command, text: "" })),
+      synthesize: vi.fn(async () => audio),
+    };
+    const signal = new AbortController().signal;
+    await handleVoiceCommand.call(bot, assistant, speaker, Buffer.alloc(640), signal);
     expect(bot.cmdNext).toHaveBeenCalledOnce();
-    expect(bot.tsClient.sendTextMessage).toHaveBeenCalledExactlyOnceWith("已切换到下一首");
+    expect(assistant.reply).toHaveBeenCalledExactlyOnceWith("下一首", signal);
+    expect(bot.tsClient.sendTextMessage.mock.calls).toEqual([["听到：下一首"], ["已切换到下一首"]]);
+    expect(assistant.synthesize).toHaveBeenCalledExactlyOnceWith("已切换到下一首", signal);
+    expect(bot.player.playSpeech).toHaveBeenCalledExactlyOnceWith(audio, signal);
+  });
+
+  it.each([true, false])("speaks the LLM's text with channel text permission: %s", async (canSendText) => {
+    const sendTextMessage = vi.fn();
+    if (!canSendText) sendTextMessage.mockRejectedValue(new Error("missing channel text permission"));
+    const bot = {
+      executeCommand: vi.fn(), tsClient: { sendTextMessage }, player: { playSpeech: vi.fn() }, logger: { warn: vi.fn() },
+    };
+    const audio = Buffer.alloc(3840);
+    const text = "你好，想听什么歌？";
+    const assistant = {
+      transcribe: async () => "你好",
+      reply: async () => ({ command: null, text }),
+      synthesize: vi.fn(async () => audio),
+    };
+    const signal = new AbortController().signal;
+    await handleVoiceCommand.call(bot, assistant, speaker, Buffer.alloc(640), signal);
+    expect(bot.executeCommand).not.toHaveBeenCalled();
+    expect(bot.tsClient.sendTextMessage.mock.calls).toEqual([["听到：你好"], [text]]);
+    expect(assistant.synthesize).toHaveBeenCalledExactlyOnceWith(text, signal);
+    expect(bot.player.playSpeech).toHaveBeenCalledExactlyOnceWith(audio, signal);
+  });
+
+  it("shows the transcript even when the LLM request fails", async () => {
+    const bot = { executeCommand: vi.fn(), tsClient: { sendTextMessage: vi.fn() } };
+    const assistant = {
+      transcribe: vi.fn(async () => "下一首"),
+      reply: vi.fn().mockRejectedValue(new Error("LLM unavailable")),
+    };
+    const result = handleVoiceCommand.call(bot, assistant, speaker, Buffer.alloc(640), new AbortController().signal);
+    await expect(result).rejects.toThrow("LLM unavailable");
+    expect(bot.tsClient.sendTextMessage).toHaveBeenCalledExactlyOnceWith("听到：下一首");
+    expect(bot.executeCommand).not.toHaveBeenCalled();
   });
 
   it("does not execute a tool response that arrives after its voice session was cancelled", async () => {
-    const pending = deferred<typeof command>();
-    const bot = { executeCommand: vi.fn() };
+    const pending = deferred<{ command: typeof command; text: string }>();
+    const started = deferred<void>();
+    const bot = { executeCommand: vi.fn(), tsClient: { sendTextMessage: vi.fn() } };
+    const assistant = {
+      transcribe: async () => "下一首",
+      reply: () => {
+        started.resolve();
+        return pending.promise;
+      },
+    };
     const signal = new AbortController();
-    const result = handleVoiceCommand.call(bot, { interpret: () => pending.promise }, speaker, Buffer.alloc(640), signal.signal);
+    const result = handleVoiceCommand.call(bot, assistant, speaker, Buffer.alloc(640), signal.signal);
+    await started.promise;
     signal.abort();
-    pending.resolve(command);
+    pending.resolve({ command, text: "" });
     await result;
     expect(bot.executeCommand).not.toHaveBeenCalled();
   });

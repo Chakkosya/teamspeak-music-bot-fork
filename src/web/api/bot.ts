@@ -9,6 +9,7 @@ import { requirePermission, requireBotAccess } from "../middleware/requirePermis
 import { requireNotGuest } from "../middleware/requireNotGuest.js";
 import { GUEST_PERMISSION_FLAGS } from "../../data/permissions.js";
 import { createVoiceAssistant, type VoiceAssistant } from "../../voice/assistant.js";
+import { testVoiceControl } from "../../voice/diagnostic.js";
 
 export function createBotRouter(
   botManager: BotManager,
@@ -67,12 +68,24 @@ export function createBotRouter(
   });
 
   const voiceControlView = () => {
-    const { asrApiKey, llmApiKey, ...settings } = config.voiceControl;
-    return { ...settings, hasAsrApiKey: Boolean(asrApiKey), hasLlmApiKey: Boolean(llmApiKey) };
+    const { asrApiKey, llmApiKey, ttsApiKey, ...settings } = config.voiceControl;
+    return {
+      ...settings,
+      hasAsrApiKey: Boolean(asrApiKey),
+      hasLlmApiKey: Boolean(llmApiKey),
+      hasTtsApiKey: Boolean(ttsApiKey),
+    };
   };
 
   router.get("/settings/voice-control", requirePermission("bot.manage"), (_req, res) => {
     res.json(voiceControlView());
+  });
+
+  router.post("/settings/voice-control/test", requirePermission("bot.manage"), async (_req, res) => {
+    const controller = new AbortController();
+    res.once("close", () => controller.abort());
+    const results = await testVoiceControl(config.voiceControl, controller.signal);
+    if (!controller.signal.aborted) res.json({ results });
   });
 
   router.post("/settings/voice-control", requirePermission("bot.manage"), (req, res) => {
@@ -80,20 +93,24 @@ export function createBotRouter(
     const next = { ...previous };
     const body = req.body ?? {};
     if (typeof body.enabled === "boolean") next.enabled = body.enabled;
-    for (const field of ["wakeWord", "kwsDir", "asrBaseUrl", "asrModel", "llmBaseUrl", "llmModel"] as const) {
+    for (const field of [
+      "wakeWord", "kwsDir", "asrBaseUrl", "asrModel", "llmBaseUrl", "llmModel", "ttsBaseUrl", "ttsModel", "ttsVoice",
+    ] as const) {
       if (typeof body[field] === "string") next[field] = body[field].trim();
     }
 
-    const asrApiKey = typeof body.asrApiKey === "string" ? body.asrApiKey.trim() : "";
-    const llmApiKey = typeof body.llmApiKey === "string" ? body.llmApiKey.trim() : "";
-    if (asrApiKey) next.asrApiKey = asrApiKey;
-    if (llmApiKey) next.llmApiKey = llmApiKey;
-
     const origin = (url: string) => URL.parse(url)?.origin;
-    if ((previous.asrApiKey && !asrApiKey && origin(previous.asrBaseUrl) !== origin(next.asrBaseUrl)) ||
-        (previous.llmApiKey && !llmApiKey && origin(previous.llmBaseUrl || previous.asrBaseUrl) !== origin(next.llmBaseUrl || next.asrBaseUrl))) {
-      res.status(400).json({ error: "更换服务域名时，请重新填写该服务的 API Key。" });
-      return;
+    for (const provider of ["asr", "llm", "tts"] as const) {
+      const keyField = `${provider}ApiKey` as const;
+      const urlField = `${provider}BaseUrl` as const;
+      const apiKey = body[keyField];
+      if (apiKey === null) next[keyField] = "";
+      else if (typeof apiKey === "string" && apiKey.trim()) next[keyField] = apiKey.trim();
+      else if (next[keyField] &&
+          origin(previous[urlField] || previous.asrBaseUrl) !== origin(next[urlField] || next.asrBaseUrl)) {
+        res.status(400).json({ error: "更换服务域名时，请删除旧密钥或填写新服务的 API Key。" });
+        return;
+      }
     }
 
     let assistant: VoiceAssistant | undefined;

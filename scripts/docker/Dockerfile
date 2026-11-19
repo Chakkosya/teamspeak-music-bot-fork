@@ -65,6 +65,7 @@ ENV VOICE_KWS_DIR=/opt/wake-model
 COPY --from=builder /app/scripts/check-native.mjs ./scripts/check-native.mjs
 # ...and the module it imports for crash-proof logging.
 COPY --from=builder /app/scripts/lib/console-log.mjs ./scripts/lib/console-log.mjs
+COPY --from=builder /app/scripts/voice-test.wav ./scripts/voice-test.wav
 
 # Data directory for database, cookies, logs
 RUN mkdir -p /app/data

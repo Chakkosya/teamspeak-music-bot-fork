@@ -21,6 +21,10 @@ export interface VoiceControlConfig {
   llmBaseUrl: string;
   llmModel: string;
   llmApiKey: string;
+  ttsBaseUrl: string;
+  ttsModel: string;
+  ttsVoice: string;
+  ttsApiKey: string;
 }
 
 export interface GuestModeConfig {
@@ -197,6 +201,10 @@ export function getDefaultConfig(): BotConfig {
       llmBaseUrl: "",
       llmModel: "",
       llmApiKey: "",
+      ttsBaseUrl: "",
+      ttsModel: "",
+      ttsVoice: "alloy",
+      ttsApiKey: "",
     },
     commandAliases: { p: "play", s: "skip", n: "next" },
     neteaseApiPort: 3001,

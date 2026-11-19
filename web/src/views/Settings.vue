@@ -1034,26 +1034,35 @@
           </div>
 
           <div class="form-group create-field-wide">
-            <label for="vc-asr-api-key">
-              ASR API Key
-              <span class="spotify-secret-hint" :class="{ set: voiceControlHasAsrKey }">
-                {{ voiceControlHasAsrKey ? '已设置' : '未设置' }}
+            <div class="voice-key-label">
+              <label for="vc-asr-api-key">ASR API Key</label>
+              <span class="spotify-secret-hint" :class="{ set: voiceControlHasAsrKey && !voiceControlClearAsrKey }">
+                {{ voiceControlClearAsrKey ? '待删除（保存后生效）' : voiceControlHasAsrKey ? '已设置' : '未设置' }}
               </span>
-            </label>
+              <button
+                v-if="voiceControlHasAsrKey"
+                type="button"
+                class="btn-sm"
+                @click="voiceControlClearAsrKey = !voiceControlClearAsrKey"
+              >
+                {{ voiceControlClearAsrKey ? '撤销删除' : '删除密钥' }}
+              </button>
+            </div>
             <input
               id="vc-asr-api-key"
               v-model="voiceControlForm.asrApiKey"
               class="input"
               type="password"
               autocomplete="new-password"
-              placeholder="留空表示不修改已保存的 API Key"
+              :disabled="voiceControlClearAsrKey"
+              placeholder="留空保留已保存的 API Key"
             />
           </div>
         </div>
 
         <h3 class="subsection-title">意图解析（LLM）</h3>
         <p class="create-field-hint">
-          LLM 接口地址留空时跟随 ASR 地址；若地址一致且未单独保存 LLM Key，将自动使用 ASR Key。更换服务商域名时，已保存的密钥需要重新填写新 Key。
+          LLM 接口地址留空时跟随 ASR 地址。若地址一致且未单独保存 LLM Key，将沿用 ASR Key。更换服务域名时，请删除旧密钥或填写新 Key。
         </p>
         <div class="create-field-grid">
           <div class="form-group">
@@ -1079,19 +1088,94 @@
           </div>
 
           <div class="form-group create-field-wide">
-            <label for="vc-llm-api-key">
-              LLM API Key
-              <span class="spotify-secret-hint" :class="{ set: voiceControlHasLlmKey }">
-                {{ voiceControlHasLlmKey ? '已设置' : '未设置' }}
+            <div class="voice-key-label">
+              <label for="vc-llm-api-key">LLM API Key</label>
+              <span class="spotify-secret-hint" :class="{ set: voiceControlHasLlmKey && !voiceControlClearLlmKey }">
+                {{ voiceControlClearLlmKey ? '待删除（保存后生效）' : voiceControlHasLlmKey ? '已设置' : '未设置' }}
               </span>
-            </label>
+              <button
+                v-if="voiceControlHasLlmKey"
+                type="button"
+                class="btn-sm"
+                @click="voiceControlClearLlmKey = !voiceControlClearLlmKey"
+              >
+                {{ voiceControlClearLlmKey ? '撤销删除' : '删除密钥' }}
+              </button>
+            </div>
             <input
               id="vc-llm-api-key"
               v-model="voiceControlForm.llmApiKey"
               class="input"
               type="password"
               autocomplete="new-password"
-              placeholder="留空表示不修改已保存的 API Key"
+              :disabled="voiceControlClearLlmKey"
+              placeholder="留空保留已保存的 API Key"
+            />
+          </div>
+        </div>
+
+        <h3 class="subsection-title">语音回复（TTS）</h3>
+        <p class="create-field-hint">
+          TTS 模型留空时仅文字回复，填写模型后启用语音回复。TTS 接口地址留空时跟随 ASR 地址；若实际地址一致且未单独保存 TTS Key，将沿用 ASR Key。
+        </p>
+        <div class="create-field-grid">
+          <div class="form-group">
+            <label for="vc-tts-base-url">TTS 接口地址</label>
+            <input
+              id="vc-tts-base-url"
+              v-model="voiceControlForm.ttsBaseUrl"
+              class="input"
+              autocomplete="off"
+              :placeholder="voiceControlForm.asrBaseUrl.trim() ? `留空跟随 ASR（${voiceControlForm.asrBaseUrl.trim()}）` : '留空则跟随 ASR 接口地址'"
+            />
+          </div>
+
+          <div class="form-group">
+            <label for="vc-tts-model">TTS 模型</label>
+            <input
+              id="vc-tts-model"
+              v-model="voiceControlForm.ttsModel"
+              class="input"
+              autocomplete="off"
+              placeholder="gpt-4o-mini-tts"
+            />
+          </div>
+
+          <div class="form-group">
+            <label for="vc-tts-voice">TTS 音色</label>
+            <input
+              id="vc-tts-voice"
+              v-model="voiceControlForm.ttsVoice"
+              class="input"
+              autocomplete="off"
+              placeholder="alloy"
+            />
+            <p class="create-field-hint">默认 alloy。</p>
+          </div>
+
+          <div class="form-group create-field-wide">
+            <div class="voice-key-label">
+              <label for="vc-tts-api-key">TTS API Key</label>
+              <span class="spotify-secret-hint" :class="{ set: voiceControlHasTtsKey && !voiceControlClearTtsKey }">
+                {{ voiceControlClearTtsKey ? '待删除（保存后生效）' : voiceControlHasTtsKey ? '已设置' : '未设置' }}
+              </span>
+              <button
+                v-if="voiceControlHasTtsKey"
+                type="button"
+                class="btn-sm"
+                @click="voiceControlClearTtsKey = !voiceControlClearTtsKey"
+              >
+                {{ voiceControlClearTtsKey ? '撤销删除' : '删除密钥' }}
+              </button>
+            </div>
+            <input
+              id="vc-tts-api-key"
+              v-model="voiceControlForm.ttsApiKey"
+              class="input"
+              type="password"
+              autocomplete="new-password"
+              :disabled="voiceControlClearTtsKey"
+              placeholder="留空保留已保存的 API Key"
             />
           </div>
         </div>
@@ -1103,6 +1187,8 @@
         </div>
       </fieldset>
       <p v-else-if="!voiceControlMessage" class="create-field-hint" role="status">正在加载语音控制设置…</p>
+
+      <VoiceControlTest v-if="voiceControlLoaded" :disabled="voiceControlSaving" />
 
       <p
         v-if="voiceControlMessage"
@@ -1452,6 +1538,7 @@ import AvatarUpload from '../components/AvatarUpload.vue';
 import CustomAvatarRow from '../components/CustomAvatarRow.vue';
 import AccentColorPicker from '../components/AccentColorPicker.vue';
 import PersonalNeteaseAccount from '../components/PersonalNeteaseAccount.vue';
+import VoiceControlTest from '../components/VoiceControlTest.vue';
 import QRCode from 'qrcode';
 import { usePlayerStore } from '../stores/player.js';
 import { useSession } from '../composables/useSession.js';
@@ -2097,8 +2184,12 @@ interface VoiceControlSettings {
   asrModel: string;
   llmBaseUrl: string;
   llmModel: string;
+  ttsBaseUrl: string;
+  ttsModel: string;
+  ttsVoice: string;
   hasAsrApiKey: boolean;
   hasLlmApiKey: boolean;
+  hasTtsApiKey: boolean;
 }
 
 const voiceControlForm = reactive({
@@ -2111,18 +2202,30 @@ const voiceControlForm = reactive({
   llmBaseUrl: '',
   llmModel: '',
   llmApiKey: '',
+  ttsBaseUrl: '',
+  ttsModel: '',
+  ttsVoice: 'alloy',
+  ttsApiKey: '',
 });
 const voiceControlHasAsrKey = ref(false);
 const voiceControlHasLlmKey = ref(false);
+const voiceControlHasTtsKey = ref(false);
+const voiceControlClearAsrKey = ref(false);
+const voiceControlClearLlmKey = ref(false);
+const voiceControlClearTtsKey = ref(false);
 const voiceControlLoaded = ref(false);
 const voiceControlSaving = ref(false);
 const voiceControlMessage = ref('');
 const voiceControlMessageTone = ref<'ok' | 'warn'>('ok');
 
-function applyVoiceControlConfig({ hasAsrApiKey, hasLlmApiKey, ...settings }: VoiceControlSettings) {
-  Object.assign(voiceControlForm, settings, { asrApiKey: '', llmApiKey: '' });
+function applyVoiceControlConfig({ hasAsrApiKey, hasLlmApiKey, hasTtsApiKey, ...settings }: VoiceControlSettings) {
+  Object.assign(voiceControlForm, settings, { asrApiKey: '', llmApiKey: '', ttsApiKey: '' });
   voiceControlHasAsrKey.value = hasAsrApiKey;
   voiceControlHasLlmKey.value = hasLlmApiKey;
+  voiceControlHasTtsKey.value = hasTtsApiKey;
+  voiceControlClearAsrKey.value = false;
+  voiceControlClearLlmKey.value = false;
+  voiceControlClearTtsKey.value = false;
   voiceControlLoaded.value = true;
 }
 
@@ -2141,11 +2244,12 @@ async function saveVoiceControl() {
   voiceControlSaving.value = true;
   voiceControlMessage.value = '';
   try {
-    const { asrApiKey, llmApiKey, ...settings } = voiceControlForm;
+    const { asrApiKey, llmApiKey, ttsApiKey, ...settings } = voiceControlForm;
     const res = await axios.post<VoiceControlSettings>('/api/bot/settings/voice-control', {
       ...settings,
-      asrApiKey: asrApiKey.trim() || undefined,
-      llmApiKey: llmApiKey.trim() || undefined,
+      asrApiKey: voiceControlClearAsrKey.value ? null : asrApiKey.trim() || undefined,
+      llmApiKey: voiceControlClearLlmKey.value ? null : llmApiKey.trim() || undefined,
+      ttsApiKey: voiceControlClearTtsKey.value ? null : ttsApiKey.trim() || undefined,
     });
     applyVoiceControlConfig(res.data);
     voiceControlMessageTone.value = 'ok';
@@ -3352,6 +3456,13 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+
+.voice-key-label {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
 }
 
 .voice-control-fields {

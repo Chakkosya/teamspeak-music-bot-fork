@@ -32,6 +32,7 @@ export class VoiceSession {
   constructor(
     private newWakeDetector: () => WakeDetector,
     private onAudio: (speaker: Speaker, pcm: Buffer, signal: AbortSignal) => void,
+    private onWakeOnly: () => void,
   ) {}
 
   receive({ clientId, nickname, data }: TS3VoiceFrame): void {
@@ -94,7 +95,10 @@ export class VoiceSession {
     if (start === null) return;
     const command = audio.subarray(start);
     if (command.length < MIN_COMMAND_BYTES) {
-      if (utterance.detectWake) speaker.armedUntil = Date.now() + FOLLOW_UP_MS;
+      if (utterance.detectWake) {
+        speaker.armedUntil = Date.now() + FOLLOW_UP_MS;
+        this.onWakeOnly();
+      }
       return;
     }
     this.onAudio(source, command, speaker.lifetime.signal);

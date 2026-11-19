@@ -602,6 +602,60 @@ function openPcmReadable(): Readable {
 const wait = (ms: number): Promise<void> => new Promise<void>((r) => setTimeout(r, ms));
 const FRAME_BYTES = 3840; // PCM_FRAME_BYTES: 960 samples * 2ch * 2 bytes @48k s16le
 
+describe("AudioPlayer speech replies", () => {
+  it("mixes speech into the music frame while advancing the song normally", () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+    const player = new AudioPlayer(silentLogger);
+    const encode = vi.fn((pcm: Buffer) => pcm);
+    Object.assign(player, { encoder: { encode } });
+    const music = openPcmReadable();
+    const song = Buffer.alloc(FRAME_BYTES * 2, 0x01);
+    const speech = Buffer.alloc(FRAME_BYTES, 0x05);
+    try {
+      player.setVolume(100);
+      player.playPcmStream(music);
+      music.emit("data", song);
+      player.playSpeech(speech, new AbortController().signal);
+      vi.advanceTimersByTime(40);
+
+      expect(encode.mock.calls.map(([pcm]) => pcm.readInt16LE(0))).toEqual([1079, 257]);
+      expect(player.getElapsed()).toBeCloseTo(0.04);
+      expect(player.getState()).toBe("playing");
+    } finally {
+      player.stop();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(["idle", "paused"])("plays replies while %s and stops when the voice session ends", (state) => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+    const player = new AudioPlayer(silentLogger);
+    const frame = vi.fn();
+    player.on("frame", frame);
+    try {
+      if (state === "paused") {
+        player.playPcmStream(openPcmReadable());
+        player.pause();
+        vi.advanceTimersByTime(200);
+        frame.mockClear();
+      }
+      const elapsed = player.getElapsed();
+      const session = new AbortController();
+      player.playSpeech(Buffer.alloc(FRAME_BYTES * 2, 0x01), session.signal);
+      vi.advanceTimersByTime(20);
+      session.abort();
+      vi.advanceTimersByTime(40);
+
+      expect(frame).toHaveBeenCalledOnce();
+      expect(player.getElapsed()).toBe(elapsed);
+      expect(player.getState()).toBe(state);
+    } finally {
+      player.stop();
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("AudioPlayer external-PCM mode (playPcmStream)", () => {
   it("emits Opus 'frame' events from the external PCM stream without spawning ffmpeg", async () => {
     const player = new AudioPlayer(silentLogger);

@@ -140,6 +140,105 @@ describe("bot router /settings", () => {
     expect(updateVoiceAssistant).not.toHaveBeenCalled();
   });
 
+  it("deletes only the API key selected for removal, including when changing its provider", async () => {
+    const endpoint = "/api/bot/settings/voice-control";
+    Object.assign(config.voiceControl, {
+      asrApiKey: "transcription-key",
+      llmBaseUrl: "https://llm.example/v1",
+      llmApiKey: "command-key",
+      ttsBaseUrl: "https://tts.example/v1",
+      ttsApiKey: "speech-key",
+    });
+
+    const removedAsr = await request(app).post(endpoint).set("Cookie", cookie).send({
+      asrBaseUrl: "https://asr.example/v1", asrApiKey: null, llmApiKey: " ",
+    });
+    expect(removedAsr.status).toBe(200);
+    expect(removedAsr.body).toMatchObject({ hasAsrApiKey: false, hasLlmApiKey: true, hasTtsApiKey: true });
+    expect(loadConfig(configPath).voiceControl).toMatchObject({ asrApiKey: "", llmApiKey: "command-key" });
+
+    const removedLlm = await request(app).post(endpoint).set("Cookie", cookie).send({ llmApiKey: null, ttsApiKey: null });
+    expect(removedLlm.status).toBe(200);
+    expect(removedLlm.body).toMatchObject({ hasAsrApiKey: false, hasLlmApiKey: false, hasTtsApiKey: false });
+    expect(loadConfig(configPath).voiceControl).toMatchObject({ llmApiKey: "", ttsApiKey: "" });
+  });
+
+  it("tests the saved TTS provider and keeps its key out of settings responses", async () => {
+    config.voiceControl.kwsDir = join(tmpDir, "missing-model");
+    config.voiceControl.asrModel = "";
+    const endpoint = "/api/bot/settings/voice-control";
+    const settings = await request(app).post(endpoint).set("Cookie", cookie).send({
+      ttsBaseUrl: "https://tts.example/v1",
+      ttsModel: "speech-model",
+      ttsVoice: "coral",
+      ttsApiKey: "speech-key",
+    });
+    expect(settings.status).toBe(200);
+    expect(settings.body).toMatchObject({ ttsModel: "speech-model", ttsVoice: "coral", hasTtsApiKey: true });
+    expect(settings.body).not.toHaveProperty("ttsApiKey");
+    const fetchModel = vi.fn(async (url: string, options: RequestInit) => {
+      expect(url).toBe("https://tts.example/v1/audio/speech");
+      expect(new Headers(options.headers).get("Authorization")).toBe("Bearer speech-key");
+      expect(JSON.parse(options.body as string)).toEqual({
+        model: "speech-model",
+        voice: "coral",
+        input: "语音回复测试成功。",
+        response_format: "wav",
+      });
+      return new Response(null, { status: 401 });
+    });
+    vi.stubGlobal("fetch", fetchModel);
+    try {
+      const res = await request(app).post(`${endpoint}/test`).set("Cookie", cookie);
+      expect(res.status).toBe(200);
+      expect(res.body.results).toContainEqual({ stage: "tts", ok: false, message: expect.stringContaining("HTTP 401") });
+      expect(fetchModel).toHaveBeenCalledOnce();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it.each([200, 401])("reports each stage of the saved voice configuration with ASR status %d", async (asrStatus) => {
+    Object.assign(config.voiceControl, {
+      kwsDir: join(tmpDir, "missing-model"),
+      asrModel: "speech-model",
+      llmModel: "command-model",
+      asrBaseUrl: "https://speech.example/v1",
+      asrApiKey: "shared-key",
+    });
+    const fetchModel = vi.fn(async (url: string, options: RequestInit) => {
+      expect(new Headers(options.headers).get("Authorization")).toBe("Bearer shared-key");
+      if (url.endsWith("/audio/transcriptions")) {
+        const form = options.body as FormData;
+        expect(form.get("model")).toBe("speech-model");
+        const clip = Buffer.from(await (form.get("file") as File).arrayBuffer());
+        expect(clip.toString("ascii", 0, 4)).toBe("RIFF");
+        expect(clip.readUInt32LE(24)).toBe(16_000);
+        return Response.json({ text: "下一首" }, { status: asrStatus });
+      }
+      expect(url).toBe("https://speech.example/v1/chat/completions");
+      const body = JSON.parse(options.body as string);
+      expect(body.model).toBe("command-model");
+      expect(body.messages[1]).toEqual({ role: "user", content: "下一首" });
+      return Response.json({ choices: [{ message: { tool_calls: [{ function: { name: "next", arguments: "{}" } }] } }] });
+    });
+    vi.stubGlobal("fetch", fetchModel);
+    try {
+      const res = await request(app).post("/api/bot/settings/voice-control/test").set("Cookie", cookie);
+      expect(res.status).toBe(200);
+      expect(res.body.results).toEqual([
+        { stage: "wake", ok: false, message: expect.stringContaining("找不到唤醒模型") },
+        { stage: "asr", ok: asrStatus === 200, message: expect.stringContaining(asrStatus === 200 ? "下一首" : "HTTP 401") },
+        { stage: "llm", ok: true, message: expect.stringContaining("next") },
+      ]);
+      expect(fetchModel).toHaveBeenCalledTimes(2);
+      expect(updateVoiceAssistant).not.toHaveBeenCalled();
+      expect(existsSync(configPath)).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("POST /settings safely partial-merges, persists and hot-applies voiceDucking", async () => {
     const enable = await request(app)
       .post("/api/bot/settings")

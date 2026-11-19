@@ -206,6 +206,7 @@ export class AudioPlayer extends EventEmitter {
   private duckingRampStartedAt = 0;
   private duckingRampDurationMs = 0;
   private pcmBuffer: Buffer = Buffer.alloc(0);
+  private readonly speechQueue: { pcm: Buffer; signal: AbortSignal }[] = [];
   private transitionSilence = false;
   private pauseFrames = 0;
   private resumeSilenceFrames = 0;
@@ -260,6 +261,12 @@ export class AudioPlayer extends EventEmitter {
     super();
     this.encoder = createOpusEncoder();
     this.logger = logger;
+  }
+
+  playSpeech(pcm: Buffer, signal: AbortSignal): void {
+    if (signal.aborted) return;
+    this.speechQueue.push({ pcm, signal });
+    this.startFrameLoop();
   }
 
   play(url: string, seekSeconds = 0, songDuration = 0): void {
@@ -663,7 +670,7 @@ export class AudioPlayer extends EventEmitter {
     this.transportRampEnd = null;
     this.transportRampFrom = 1;
     this.transportRampTo = 1;
-    if (keepAlive) {
+    if (keepAlive || this.hasSpeech()) {
       this.frameLoopRunning = true;
       this.nextFrameTime = wasRunning ? Math.max(performance.now(), deadline - FRAME_DURATION_MS) : performance.now();
       this.scheduleNextFrame();
@@ -719,14 +726,21 @@ export class AudioPlayer extends EventEmitter {
           if (this.pauseFrames > 3) this.sendNextFrame();
           else this.emitSilenceFrame(false);
         } else {
-          this.nextFrameTime = performance.now();
           if (this.stopAfterPauseTail) {
             this.stop();
             return;
           }
+          if (this.hasSpeech()) this.emitSilenceFrame(false);
+          else this.nextFrameTime = performance.now();
         }
       }
-      else if (this.state === "idle" && this.transitionSilence) this.emitSilenceFrame(false);
+      else if (this.state === "idle") {
+        if (this.transitionSilence || this.hasSpeech()) this.emitSilenceFrame(false);
+        else {
+          this.frameLoopRunning = false;
+          return;
+        }
+      }
       else if (this.state === "playing" && this.resumeSilenceFrames > 0) {
         this.resumeSilenceFrames--;
         this.emitSilenceFrame(false);
@@ -794,6 +808,7 @@ export class AudioPlayer extends EventEmitter {
           }
           this.consecutiveFailures = 0;
           this.emit("trackEnd");
+          if (this.hasSpeech()) this.startFrameLoop();
           return;
         }
       } else {
@@ -811,6 +826,7 @@ export class AudioPlayer extends EventEmitter {
           this.consecutiveFailures = 0;
           this.emit("trackEnd");
         }
+        if (this.hasSpeech()) this.startFrameLoop();
         return;
       }
       this.scheduleNextFrame();
@@ -821,7 +837,9 @@ export class AudioPlayer extends EventEmitter {
     if (this.pcmBuffer.length < PCM_FRAME_BYTES) {
       // Keep the voice timeline continuous while the source is preparing/stalled.
       // URL silence must not advance elapsed time or hide the stall watchdog.
-      if (this.externalMode || this.ffmpeg || this.downloader || this.transitionSilence) this.emitSilenceFrame(this.externalMode);
+      if (this.externalMode || this.ffmpeg || this.downloader || this.transitionSilence || this.hasSpeech()) {
+        this.emitSilenceFrame(this.externalMode);
+      }
       return;
     }
     this.transitionSilence = false;
@@ -839,9 +857,7 @@ export class AudioPlayer extends EventEmitter {
     }
 
     try {
-      const adjusted = this.applyVolume(pcmFrame);
-      const opusFrame = this.encoder.encode(adjusted);
-      this.emit("frame", opusFrame);
+      this.emitPcmFrame(this.applyVolume(pcmFrame));
       this.framesPlayed++;
       this.healthyFrames++;
       if (this.healthyFrames >= AudioPlayer.HEALTHY_FRAME_RESET) {
@@ -855,12 +871,32 @@ export class AudioPlayer extends EventEmitter {
 
   private emitSilenceFrame(advanceTimeline = true): void {
     try {
-      const opusFrame = this.encoder.encode(Buffer.alloc(PCM_FRAME_BYTES));
-      this.emit("frame", opusFrame);
+      this.emitPcmFrame(Buffer.alloc(PCM_FRAME_BYTES));
       if (advanceTimeline) this.framesPlayed++;
     } catch (err) {
       this.emit("error", err as Error);
     }
+  }
+
+  private hasSpeech(): boolean {
+    while (this.speechQueue[0]?.signal.aborted) this.speechQueue.shift();
+    return this.speechQueue.length > 0;
+  }
+
+  private emitPcmFrame(pcm: Buffer): void {
+    if (this.hasSpeech()) {
+      // The reply and music share one Opus frame and one TeamSpeak voice stream.
+      const speech = this.speechQueue[0];
+      const reply = speech.pcm.subarray(0, PCM_FRAME_BYTES);
+      for (let offset = 0; offset < pcm.length; offset += 2) {
+        const music = pcm.readInt16LE(offset);
+        const voice = offset < reply.length ? reply.readInt16LE(offset) : 0;
+        pcm.writeInt16LE(Math.round(music * 0.2 + voice * 0.8), offset);
+      }
+      speech.pcm = speech.pcm.subarray(reply.length);
+      if (!speech.pcm.length) this.speechQueue.shift();
+    }
+    this.emit("frame", this.encoder.encode(pcm));
   }
 
   private applyVolume(pcm: Buffer): Buffer {

@@ -549,13 +549,20 @@ export class BotInstance extends EventEmitter {
       this.voiceSession = undefined;
     }
     if (!assistant) return;
-    this.voiceSession = new VoiceSession(assistant.newWakeDetector, (speaker, pcm, signal) => {
-      void this.handleVoiceCommand(assistant, speaker, pcm, signal).catch(async (err) => {
-        if (signal.aborted) return;
-        this.logger.warn({ err }, "Voice command failed");
-        await this.tsClient.sendTextMessage("语音指令处理失败，请稍后重试。");
-      }).catch((err) => this.logger.warn({ err }, "Failed to send voice command reply"));
-    });
+    this.voiceSession = new VoiceSession(
+      assistant.newWakeDetector,
+      (speaker, pcm, signal) => {
+        void this.handleVoiceCommand(assistant, speaker, pcm, signal).catch(async (err) => {
+          if (signal.aborted) return;
+          this.logger.warn({ err }, "Voice command failed");
+          await this.tsClient.sendTextMessage("语音指令处理失败，请在网页的语音控制设置中测试配置。");
+        }).catch((err) => this.logger.warn({ err }, "Failed to send voice command reply"));
+      },
+      () => {
+        void this.tsClient.sendTextMessage("已唤醒，请在 4 秒内说出指令。")
+          .catch((err) => this.logger.warn({ err }, "Failed to send wake acknowledgement"));
+      },
+    );
     this.tsClient.on("voiceFrame", this.receiveVoiceFrame);
   }
 
@@ -874,16 +881,45 @@ export class BotInstance extends EventEmitter {
     pcm: Buffer,
     signal: AbortSignal,
   ): Promise<void> {
-    const command = await assistant.interpret(pcm, signal);
-    if (!command || signal.aborted) return;
-    const allowed = await this.isCommandAllowed(command.name, String(speaker.clientId));
+    const sendText = async (message: string) => {
+      try {
+        for (const chunk of splitTextIntoChunks(message)) {
+          if (signal.aborted) return;
+          await this.tsClient.sendTextMessage(chunk);
+        }
+      } catch (err) {
+        this.logger.warn({ err }, "Failed to send voice command text");
+      }
+    };
+    const text = await assistant.transcribe(pcm, signal);
     if (signal.aborted) return;
-    if (!allowed) {
-      await this.tsClient.sendTextMessage(COMMAND_DENIED_MESSAGE);
+    if (!text) {
+      await sendText("没有识别到语音指令。");
       return;
     }
-    const response = await this.executeCommand(command, undefined, speaker.nickname);
-    if (response && !signal.aborted) await this.tsClient.sendTextMessage(response);
+    await sendText(`听到：${text}`);
+    if (signal.aborted) return;
+    const reply = await assistant.reply(text, signal);
+    if (signal.aborted) return;
+    let response: string | null = reply.text || "没听出要执行的播放指令。";
+    if (reply.command) {
+      const allowed = await this.isCommandAllowed(reply.command.name, String(speaker.clientId));
+      if (signal.aborted) return;
+      response = allowed
+        ? await this.executeCommand(reply.command, undefined, speaker.nickname)
+        : COMMAND_DENIED_MESSAGE;
+    }
+    if (!response || signal.aborted) return;
+    await sendText(response);
+    if (!assistant.synthesize || signal.aborted) return;
+    try {
+      const audio = await assistant.synthesize(response, signal);
+      this.player.playSpeech(audio, signal);
+    } catch (err) {
+      if (signal.aborted) return;
+      this.logger.warn({ err }, "Voice reply synthesis failed");
+      await sendText("语音合成失败，请在网页的语音控制设置中测试配置。");
+    }
   }
 
   /**

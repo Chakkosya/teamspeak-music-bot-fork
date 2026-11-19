@@ -1,11 +1,17 @@
 import type { ParsedCommand } from "../bot/commands.js";
 import type { VoiceControlConfig } from "../data/config.js";
+import { decodeSpeech } from "../audio/speech.js";
 import { loadWakeDetector, VOICE_BYTES_PER_SECOND, VOICE_SAMPLE_RATE, type WakeDetector } from "./keyword.js";
 
 interface ModelEndpoint {
   baseUrl: string;
   model: string;
   apiKey?: string;
+}
+
+interface VoiceReply {
+  command: ParsedCommand | null;
+  text: string;
 }
 
 const tools = [
@@ -28,25 +34,49 @@ const tools = [
 
 export interface VoiceAssistant {
   newWakeDetector: () => WakeDetector;
-  interpret(pcm: Buffer, signal: AbortSignal): Promise<ParsedCommand | null>;
+  transcribe(pcm: Buffer, signal: AbortSignal): Promise<string>;
+  reply(text: string, signal: AbortSignal): Promise<VoiceReply>;
+  synthesize?: (text: string, signal: AbortSignal) => Promise<Buffer>;
 }
 
 export function createVoiceAssistant(config: VoiceControlConfig): VoiceAssistant | undefined {
   if (!config.enabled) return;
-  if (!config.asrModel || !config.llmModel) throw new Error("启用语音控制时，请填写语音转文字模型和 LLM 模型。");
-  const asrUrl = modelUrl(config.asrBaseUrl);
-  const llmUrl = config.llmBaseUrl ? modelUrl(config.llmBaseUrl) : asrUrl;
-  const asr: ModelEndpoint = {
-    baseUrl: asrUrl,
+  const asr = transcriptionEndpoint(config);
+  const llm = toolsEndpoint(config);
+  const tts = config.ttsModel ? speechEndpoint(config) : undefined;
+  return {
+    newWakeDetector: loadWakeDetector(config.kwsDir, config.wakeWord),
+    transcribe: (pcm, signal) => transcribeAudio(asr, wav(pcm), signal),
+    reply: (text, signal) => getVoiceReply(llm, text, signal),
+    synthesize: tts && ((text, signal) => synthesizeSpeech(tts, text, signal)),
+  };
+}
+
+export function transcriptionEndpoint(config: VoiceControlConfig): ModelEndpoint {
+  if (!config.asrModel) throw new Error("请填写语音转文字模型。");
+  return {
+    baseUrl: modelUrl(config.asrBaseUrl),
     model: config.asrModel,
     apiKey: config.asrApiKey,
   };
-  const llm: ModelEndpoint = {
-    baseUrl: llmUrl,
-    model: config.llmModel,
-    apiKey: config.llmApiKey || (llmUrl === asrUrl ? asr.apiKey : undefined),
+}
+
+export function toolsEndpoint(config: VoiceControlConfig): ModelEndpoint {
+  if (!config.llmModel) throw new Error("请填写 LLM 模型。");
+  return sharedEndpoint(config.asrBaseUrl, config.asrApiKey, config.llmBaseUrl, config.llmModel, config.llmApiKey);
+}
+
+export function speechEndpoint(config: VoiceControlConfig) {
+  return {
+    ...sharedEndpoint(config.asrBaseUrl, config.asrApiKey, config.ttsBaseUrl, config.ttsModel, config.ttsApiKey),
+    voice: config.ttsVoice || "alloy",
   };
-  return { newWakeDetector: loadWakeDetector(config.kwsDir, config.wakeWord), interpret: createVoiceInterpreter(asr, llm) };
+}
+
+function sharedEndpoint(asrBaseUrl: string, asrKey: string, url: string, model: string, apiKey: string): ModelEndpoint {
+  const baseUrl = modelUrl(url || asrBaseUrl);
+  const asrUrl = URL.parse(asrBaseUrl)?.href.replace(/\/+$/, "");
+  return { baseUrl, model, apiKey: apiKey || (baseUrl === asrUrl ? asrKey : undefined) };
 }
 
 function modelUrl(input: string): string {
@@ -57,54 +87,107 @@ function modelUrl(input: string): string {
   return url.href.replace(/\/+$/, "");
 }
 
-export function createVoiceInterpreter(asr: ModelEndpoint, llm: ModelEndpoint): VoiceAssistant["interpret"] {
-  return async (pcm, signal) => {
-    const audio = new FormData();
-    audio.set("model", asr.model);
-    audio.set("file", new Blob([wav(pcm)], { type: "audio/wav" }), "command.wav");
-    const transcript = await request<{ text: string }>(asr, "/audio/transcriptions", audio, signal);
-    const text = transcript.text.trim();
-    if (!text) return null;
-
-    const completion = await request<{
-      choices: { message: { tool_calls?: { function: { name: string; arguments: string } }[] } }[];
-    }>(llm, "/chat/completions", JSON.stringify({
-      model: llm.model,
-      messages: [
-        { role: "system", content: "你控制音乐机器人。只在用户明确要求时调用一个工具。遇到闲聊、唤醒词、否定、引用、含糊或不支持的请求时，不调用工具。点歌时保留歌名和歌手。" },
-        { role: "user", content: text },
-      ],
-      tools,
-    }), signal);
-
-    const calls = completion.choices[0]?.message.tool_calls;
-    if (calls?.length !== 1) return null;
-    const action = calls[0].function;
-    if (action.name === "pause" || action.name === "next") {
-      return { name: action.name, args: "", rawArgs: [], flags: new Set() };
-    }
-    if (action.name !== "play") return null;
-    const parameters = JSON.parse(action.arguments) as { query?: unknown } | null;
-    const query = typeof parameters?.query === "string" ? parameters.query.trim() : "";
-    return query ? { name: "play", args: query, rawArgs: query.split(/\s+/), flags: new Set() } : null;
-  };
+export async function transcribeAudio(asr: ModelEndpoint, wave: Buffer<ArrayBuffer>, signal: AbortSignal): Promise<string> {
+  const audio = new FormData();
+  audio.set("model", asr.model);
+  audio.set("file", new Blob([wave], { type: "audio/wav" }), "command.wav");
+  const transcript = await request(asr, "/audio/transcriptions", audio, signal, json<{ text?: string }>);
+  if (typeof transcript?.text !== "string") throw new Error("转写接口未返回 text 字段。");
+  return transcript.text.trim();
 }
 
-async function request<T>(endpoint: ModelEndpoint, path: string, body: FormData | string, signal: AbortSignal): Promise<T> {
+export async function getVoiceReply(llm: ModelEndpoint, text: string, signal: AbortSignal): Promise<VoiceReply> {
+  type ToolCall = { function: { name: string; arguments: string } };
+  type Completion = { choices: { message: { content?: string | null; tool_calls?: ToolCall[] } }[] };
+  const completion = await request(llm, "/chat/completions", JSON.stringify({
+    model: llm.model,
+    messages: [
+      { role: "system", content: "你是 TeamSpeak 频道里的音乐机器人。只在用户明确要求时调用一个播放工具，点歌时保留歌名和歌手。遇到闲聊、唤醒词、否定、引用、含糊或不支持的请求时，不调用工具，直接用一两句适合朗读的自然语言回答，不使用 Markdown。" },
+      { role: "user", content: text },
+    ],
+    tools,
+  }), signal, json<Completion>);
+
+  const message = completion?.choices?.[0]?.message;
+  if (!message) throw new Error("LLM 接口未返回聊天消息。");
+  const calls = message.tool_calls;
+  if (!calls?.length) return { command: null, text: message.content?.trim() ?? "" };
+  return { command: calls.length === 1 ? parseAction(calls[0].function) : null, text: "" };
+}
+
+function parseAction(action: { name: string; arguments: string }): ParsedCommand | null {
+  if (action.name === "pause" || action.name === "next") {
+    return { name: action.name, args: "", rawArgs: [], flags: new Set() };
+  }
+  if (action.name !== "play") return null;
+  let parameters: { query?: unknown } | null;
+  try {
+    parameters = JSON.parse(action.arguments);
+  } catch {
+    throw new Error("LLM 返回了无法解析的工具参数。");
+  }
+  const query = typeof parameters?.query === "string" ? parameters.query.trim() : "";
+  return query ? { name: "play", args: query, rawArgs: query.split(/\s+/), flags: new Set() } : null;
+}
+
+export async function synthesizeSpeech(
+  tts: ModelEndpoint & { voice: string }, text: string, signal: AbortSignal,
+): Promise<Buffer> {
+  const wave = await request(tts, "/audio/speech", JSON.stringify({
+    model: tts.model,
+    voice: tts.voice,
+    input: text,
+    response_format: "wav",
+  }), signal, response => response.arrayBuffer());
+  return decodeSpeech(Buffer.from(wave), signal);
+}
+
+async function json<T>(response: Response): Promise<T> {
+  try {
+    return await response.json() as T;
+  } catch (err) {
+    throw new Error("服务未返回 JSON，请检查 API 根地址。", { cause: err });
+  }
+}
+
+async function request<T>(
+  endpoint: ModelEndpoint, path: string, body: FormData | string, signal: AbortSignal, read: (response: Response) => Promise<T>,
+): Promise<T> {
   const headers = new Headers();
   if (endpoint.apiKey) headers.set("Authorization", `Bearer ${endpoint.apiKey}`);
   if (typeof body === "string") headers.set("Content-Type", "application/json");
-  const response = await fetch(`${endpoint.baseUrl.replace(/\/+$/, "")}${path}`, {
-    method: "POST",
-    headers,
-    body,
-    signal: AbortSignal.any([signal, AbortSignal.timeout(20_000)]),
-  });
-  if (!response.ok) throw new Error(`${path}: HTTP ${response.status}`);
-  return await response.json() as T;
+  const timeout = AbortSignal.timeout(20_000);
+  let response: Response;
+  try {
+    response = await fetch(`${endpoint.baseUrl}${path}`, {
+      method: "POST",
+      headers,
+      body,
+      signal: AbortSignal.any([signal, timeout]),
+    });
+  } catch (err) {
+    if (signal.aborted) throw err;
+    throw new Error(timeout.aborted ? "服务请求超时。" : "无法连接服务，请检查接口地址和服务器网络。", { cause: err });
+  }
+  if (!response.ok) {
+    const hints: Record<number, string> = {
+      400: "请检查模型名和接口格式。",
+      401: "请检查 API Key。",
+      403: "请检查 API Key 和模型权限。",
+      404: "请检查 API 根地址和模型名。",
+      429: "请检查调用额度或频率限制。",
+    };
+    throw new Error(`HTTP ${response.status}。${hints[response.status] ?? ""}`);
+  }
+  try {
+    return await read(response);
+  } catch (err) {
+    if (timeout.aborted && !signal.aborted) throw new Error("服务请求超时。", { cause: err });
+    throw err;
+  }
 }
 
-function wav(pcm: Buffer): Buffer<ArrayBuffer> {
+export function wav(pcm: Buffer): Buffer<ArrayBuffer> {
   const file = Buffer.alloc(44 + pcm.length);
   file.write("RIFF", 0);
   file.writeUInt32LE(file.length - 8, 4);

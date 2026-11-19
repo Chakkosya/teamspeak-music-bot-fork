@@ -1,6 +1,6 @@
 import opus from "@discordjs/opus";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createVoiceInterpreter } from "./assistant.js";
+import { getVoiceReply, transcribeAudio, wav } from "./assistant.js";
 import { VOICE_SAMPLE_RATE } from "./keyword.js";
 import { VoiceSession } from "./session.js";
 
@@ -32,15 +32,15 @@ describe("voice command pipeline", () => {
         { function: { name: "play", arguments: JSON.stringify({ query: "周杰伦 晴天" }) } },
       ] } }] }));
     vi.stubGlobal("fetch", fetchMock);
-    const interpret = createVoiceInterpreter(
-      { baseUrl: "https://asr.example/v1", model: "speech", apiKey: "asr-key" },
-      { baseUrl: "https://llm.example/v1", model: "music", apiKey: "llm-key" },
-    );
+    const asr = { baseUrl: "https://asr.example/v1", model: "speech", apiKey: "asr-key" };
+    const llm = { baseUrl: "https://llm.example/v1", model: "music", apiKey: "llm-key" };
     const execute = vi.fn();
     const newWakeDetector = vi.fn().mockReturnValueOnce(() => null).mockReturnValueOnce(() => bytesPerFrame * 6);
-    const session = new VoiceSession(newWakeDetector, (speaker, pcm, signal) => {
-      void interpret(pcm, signal).then(command => execute(speaker, command));
-    });
+    const session = new VoiceSession(newWakeDetector, async (speaker, pcm, signal) => {
+      const text = await transcribeAudio(asr, wav(pcm), signal);
+      const { command } = await getVoiceReply(llm, text, signal);
+      execute(speaker, command);
+    }, vi.fn());
 
     speak(session, 8);
     await vi.advanceTimersByTimeAsync(700);
@@ -52,10 +52,10 @@ describe("voice command pipeline", () => {
     expect(asrUrl).toBe("https://asr.example/v1/audio/transcriptions");
     expect(asrRequest.headers.get("Authorization")).toBe("Bearer asr-key");
     const file = asrRequest.body.get("file") as File;
-    const wav = Buffer.from(await file.arrayBuffer());
-    expect(wav.toString("ascii", 0, 4)).toBe("RIFF");
-    expect(wav.readUInt32LE(24)).toBe(VOICE_SAMPLE_RATE);
-    expect(wav.readUInt32LE(40)).toBe(bytesPerFrame * (20 - 6));
+    const wave = Buffer.from(await file.arrayBuffer());
+    expect(wave.toString("ascii", 0, 4)).toBe("RIFF");
+    expect(wave.readUInt32LE(24)).toBe(VOICE_SAMPLE_RATE);
+    expect(wave.readUInt32LE(40)).toBe(bytesPerFrame * (20 - 6));
     expect(llmUrl).toBe("https://llm.example/v1/chat/completions");
     expect(llmRequest.headers.get("Authorization")).toBe("Bearer llm-key");
     expect(JSON.parse(llmRequest.body).messages[1]).toEqual({ role: "user", content: "放周杰伦的晴天" });
@@ -68,13 +68,15 @@ describe("voice command pipeline", () => {
   it("reserves a wake-only follow-up for its speaker and cancels it when the speaker leaves", async () => {
     vi.useFakeTimers();
     const onAudio = vi.fn();
+    const onWakeOnly = vi.fn();
     const newWakeDetector = vi.fn().mockReturnValueOnce(() => bytesPerFrame * 20).mockReturnValue(() => null);
-    const session = new VoiceSession(newWakeDetector, onAudio);
+    const session = new VoiceSession(newWakeDetector, onAudio, onWakeOnly);
     speak(session, 7);
     await vi.advanceTimersByTimeAsync(700);
     speak(session, 8);
     await vi.advanceTimersByTimeAsync(700);
     expect(onAudio).not.toHaveBeenCalled();
+    expect(onWakeOnly).toHaveBeenCalledOnce();
 
     speak(session, 7);
     await vi.advanceTimersByTimeAsync(700);
@@ -99,10 +101,20 @@ describe("voice command pipeline", () => {
     [{ function: { name: "pause", arguments: "{}" } }, { function: { name: "next", arguments: "{}" } }],
   ].map(calls => [calls]))("does not produce a command for tool calls %j", async (calls) => {
     vi.stubGlobal("fetch", vi.fn()
-      .mockResolvedValueOnce(Response.json({ text: "不确定" }))
       .mockResolvedValueOnce(Response.json({ choices: [{ message: { tool_calls: calls } }] })));
     const endpoint = { baseUrl: "https://model.example/v1", model: "test" };
-    const interpret = createVoiceInterpreter(endpoint, endpoint);
-    await expect(interpret(Buffer.alloc(12_800), new AbortController().signal)).resolves.toBeNull();
+    const reply = await getVoiceReply(endpoint, "不确定", new AbortController().signal);
+    expect(reply.command).toBeNull();
+  });
+
+  it("returns the LLM's text when there is no playback command", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({
+      choices: [{ message: { content: "你好，想听什么歌？" } }],
+    })));
+    const endpoint = { baseUrl: "https://model.example/v1", model: "test" };
+    await expect(getVoiceReply(endpoint, "你好", new AbortController().signal)).resolves.toEqual({
+      command: null,
+      text: "你好，想听什么歌？",
+    });
   });
 });
