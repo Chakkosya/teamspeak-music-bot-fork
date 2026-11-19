@@ -36,7 +36,7 @@ describe("voice command pipeline", () => {
     const llm = { baseUrl: "https://llm.example/v1", model: "music", apiKey: "llm-key" };
     const execute = vi.fn();
     const newWakeDetector = vi.fn().mockReturnValueOnce(() => null).mockReturnValueOnce(() => bytesPerFrame * 6);
-    const session = new VoiceSession(newWakeDetector, async (speaker, pcm, signal) => {
+    const session = new VoiceSession(650, newWakeDetector, async (speaker, pcm, signal) => {
       const text = await transcribeAudio(asr, wav(pcm), signal);
       const { command } = await getVoiceReply(llm, text, signal);
       execute(speaker, command);
@@ -65,12 +65,30 @@ describe("voice command pipeline", () => {
     );
   });
 
+  it("keeps collecting during a pause shorter than the configured delay", () => {
+    vi.useFakeTimers();
+    const onAudio = vi.fn();
+    const session = new VoiceSession(1200, () => () => bytesPerFrame * 6, onAudio, vi.fn());
+
+    speak(session, 7);
+    vi.advanceTimersByTime(800);
+    expect(onAudio).not.toHaveBeenCalled();
+
+    speak(session, 7);
+    vi.advanceTimersByTime(1199);
+    expect(onAudio).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(1);
+    expect(onAudio).toHaveBeenCalledOnce();
+    expect(onAudio.mock.calls[0][1]).toHaveLength(bytesPerFrame * (40 - 6));
+  });
+
   it("reserves a wake-only follow-up for its speaker and cancels it when the speaker leaves", async () => {
     vi.useFakeTimers();
     const onAudio = vi.fn();
     const onWakeOnly = vi.fn();
     const newWakeDetector = vi.fn().mockReturnValueOnce(() => bytesPerFrame * 20).mockReturnValue(() => null);
-    const session = new VoiceSession(newWakeDetector, onAudio, onWakeOnly);
+    const session = new VoiceSession(650, newWakeDetector, onAudio, onWakeOnly);
     speak(session, 7);
     await vi.advanceTimersByTimeAsync(700);
     speak(session, 8);
@@ -98,6 +116,8 @@ describe("voice command pipeline", () => {
     [],
     [{ function: { name: "clear", arguments: "{}" } }],
     [{ function: { name: "play", arguments: '{"query":" "}' } }],
+    [{ function: { name: "set_volume", arguments: '{"percent":101}' } }],
+    [{ function: { name: "set_play_mode", arguments: '{"mode":"single"}' } }],
     [{ function: { name: "pause", arguments: "{}" } }, { function: { name: "next", arguments: "{}" } }],
   ].map(calls => [calls]))("does not produce a command for tool calls %j", async (calls) => {
     vi.stubGlobal("fetch", vi.fn()
@@ -105,6 +125,27 @@ describe("voice command pipeline", () => {
     const endpoint = { baseUrl: "https://model.example/v1", model: "test" };
     const reply = await getVoiceReply(endpoint, "不确定", new AbortController().signal);
     expect(reply.command).toBeNull();
+  });
+
+  it.each([
+    ["继续播放", "resume", {}, { name: "resume", args: "" }],
+    ["上一首", "prev", {}, { name: "prev", args: "" }],
+    ["停止播放并清空队列", "stop", {}, { name: "stop", args: "" }],
+    ["音量调到六十", "set_volume", { percent: 60 }, { name: "vol", args: "60" }],
+    ["小声一点", "adjust_volume", { delta: -10 }, { name: "vol", volumeDelta: -10 }],
+    ["改成顺序播放", "set_play_mode", { mode: "seq" }, { name: "mode", args: "seq" }],
+  ] as const)("exposes and converts the tool for %s", async (text, name, parameters, command) => {
+    const fetchModel = vi.fn(async (_url: string, { body }: RequestInit) => {
+      const request = JSON.parse(body as string) as { tools: { function: { name: string } }[] };
+      expect(request.tools.some(tool => tool.function.name === name)).toBe(true);
+      return Response.json({ choices: [{ message: { tool_calls: [
+        { function: { name, arguments: JSON.stringify(parameters) } },
+      ] } }] });
+    });
+    vi.stubGlobal("fetch", fetchModel);
+    const endpoint = { baseUrl: "https://model.example/v1", model: "test" };
+    const reply = await getVoiceReply(endpoint, text, new AbortController().signal);
+    expect(reply.command).toMatchObject(command);
   });
 
   it("returns the LLM's text when there is no playback command", async () => {

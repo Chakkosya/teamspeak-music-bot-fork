@@ -2,7 +2,6 @@ import opus from "@discordjs/opus";
 import type { TS3VoiceFrame } from "../ts-protocol/client.js";
 import { VOICE_BYTES_PER_SECOND, VOICE_SAMPLE_RATE, type WakeDetector } from "./keyword.js";
 
-const END_OF_SPEECH_MS = 650;
 const FOLLOW_UP_MS = 4_000;
 const MAX_AUDIO_BYTES = VOICE_BYTES_PER_SECOND * 10;
 const MIN_COMMAND_BYTES = VOICE_BYTES_PER_SECOND * 0.18;
@@ -30,6 +29,7 @@ export class VoiceSession {
   private speakers = new Map<number, SpeakerSession>();
 
   constructor(
+    private endOfSpeechMs: number,
     private newWakeDetector: () => WakeDetector,
     private onAudio: (speaker: Speaker, pcm: Buffer, signal: AbortSignal) => void,
     private onWakeOnly: () => void,
@@ -67,7 +67,7 @@ export class VoiceSession {
       utterance.lastSpeechByte = utterance.bytes;
       clearTimeout(utterance.timer);
       const currentSpeaker = speaker;
-      utterance.timer = setTimeout(() => this.finish({ clientId, nickname }, currentSpeaker), END_OF_SPEECH_MS);
+      utterance.timer = setTimeout(() => this.finish({ clientId, nickname }, currentSpeaker), this.endOfSpeechMs);
     }
     if (utterance.bytes >= MAX_AUDIO_BYTES) this.finish({ clientId, nickname }, speaker);
   }

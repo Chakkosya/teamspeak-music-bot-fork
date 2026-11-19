@@ -550,6 +550,7 @@ export class BotInstance extends EventEmitter {
     }
     if (!assistant) return;
     this.voiceSession = new VoiceSession(
+      assistant.endOfSpeechMs,
       assistant.newWakeDetector,
       (speaker, pcm, signal) => {
         void this.handleVoiceCommand(assistant, speaker, pcm, signal).catch(async (err) => {
@@ -903,11 +904,19 @@ export class BotInstance extends EventEmitter {
     if (signal.aborted) return;
     let response: string | null = reply.text || "没听出要执行的播放指令。";
     if (reply.command) {
-      const allowed = await this.isCommandAllowed(reply.command.name, String(speaker.clientId));
+      const { volumeDelta, ...command } = reply.command;
+      const allowed = await this.isCommandAllowed(command.name, String(speaker.clientId));
       if (signal.aborted) return;
-      response = allowed
-        ? await this.executeCommand(reply.command, undefined, speaker.nickname)
-        : COMMAND_DENIED_MESSAGE;
+      if (allowed) {
+        if (volumeDelta !== undefined) {
+          const volume = Math.min(100, Math.max(0, this.player.getVolume() + volumeDelta));
+          command.args = String(volume);
+          command.rawArgs = [command.args];
+        }
+        response = await this.executeCommand(command, undefined, speaker.nickname);
+      } else {
+        response = COMMAND_DENIED_MESSAGE;
+      }
     }
     if (!response || signal.aborted) return;
     await sendText(response);

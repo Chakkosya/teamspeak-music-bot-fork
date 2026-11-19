@@ -979,7 +979,7 @@
         <label class="profile-toggle behavior-toggle spotify-toggle">
           <div class="profile-toggle-text">
             <div class="profile-toggle-label">启用语音控制</div>
-            <div class="profile-toggle-hint">开启后，频道成员可以用语音点歌、暂停或切歌。</div>
+            <div class="profile-toggle-hint">开启后，可以用语音点歌、控制播放、调节音量和切换播放模式。</div>
           </div>
           <input v-model="voiceControlForm.enabled" type="checkbox" class="profile-toggle-switch" />
         </label>
@@ -1006,6 +1006,22 @@
               autocomplete="off"
             />
             <p class="create-field-hint">本地唤醒词模型目录路径。</p>
+          </div>
+
+          <div class="form-group">
+            <label for="vc-end-of-speech">停顿多久后结束收音（毫秒）</label>
+            <input
+              id="vc-end-of-speech"
+              v-model.number="voiceControlForm.endOfSpeechMs"
+              type="number"
+              class="input"
+              min="200"
+              max="5000"
+              aria-describedby="vc-end-of-speech-hint"
+            />
+            <p id="vc-end-of-speech-hint" class="create-field-hint">
+              默认 650 毫秒（0.65 秒）。数值越大，机器人等你说完的时间越长。
+            </p>
           </div>
         </div>
 
@@ -1118,6 +1134,16 @@
         <p class="create-field-hint">
           TTS 模型留空时仅文字回复，填写模型后启用语音回复。TTS 接口地址留空时跟随 ASR 地址；若实际地址一致且未单独保存 TTS Key，将沿用 ASR Key。
         </p>
+        <div class="voice-key-label">
+          <button type="button" class="btn-sm" :disabled="ttsOptionsLoading" @click="loadTtsOptions">
+            {{ ttsOptionsLoading ? '获取中…' : '获取模型和音色' }}
+          </button>
+          <button v-if="ttsModelOptions.length" type="button" class="btn-sm" @click="ttsManual = !ttsManual">
+            {{ ttsManual ? '使用列表' : '手动填写' }}
+          </button>
+          <span class="create-field-hint">使用已保存的 TTS 地址和密钥。</span>
+        </div>
+        <p v-if="ttsOptionsMessage" class="create-field-hint" role="status">{{ ttsOptionsMessage }}</p>
         <div class="create-field-grid">
           <div class="form-group">
             <label for="vc-tts-base-url">TTS 接口地址</label>
@@ -1132,7 +1158,21 @@
 
           <div class="form-group">
             <label for="vc-tts-model">TTS 模型</label>
+            <select
+              v-if="ttsModelOptions.length && !ttsManual"
+              id="vc-tts-model"
+              :value="voiceControlForm.ttsModel"
+              class="input"
+              @change="selectTtsModel"
+            >
+              <option value="">仅文字回复</option>
+              <option v-if="voiceControlForm.ttsModel && !ttsVoiceOptions.length" :value="voiceControlForm.ttsModel">
+                {{ voiceControlForm.ttsModel }}（手动填写）
+              </option>
+              <option v-for="model in ttsModelOptions" :key="model.id" :value="model.id">{{ model.id }}</option>
+            </select>
             <input
+              v-else
               id="vc-tts-model"
               v-model="voiceControlForm.ttsModel"
               class="input"
@@ -1143,14 +1183,21 @@
 
           <div class="form-group">
             <label for="vc-tts-voice">TTS 音色</label>
+            <select v-if="ttsVoiceOptions.length && !ttsManual" id="vc-tts-voice" v-model="voiceControlForm.ttsVoice" class="input">
+              <option v-if="!voiceControlForm.ttsVoice" value="">默认 alloy</option>
+              <option v-else-if="!ttsVoiceOptions.includes(voiceControlForm.ttsVoice)" :value="voiceControlForm.ttsVoice">
+                {{ voiceControlForm.ttsVoice }}（手动填写）
+              </option>
+              <option v-for="voice in ttsVoiceOptions" :key="voice" :value="voice">{{ voice }}</option>
+            </select>
             <input
+              v-else
               id="vc-tts-voice"
               v-model="voiceControlForm.ttsVoice"
               class="input"
               autocomplete="off"
               placeholder="alloy"
             />
-            <p class="create-field-hint">默认 alloy。</p>
           </div>
 
           <div class="form-group create-field-wide">
@@ -1181,7 +1228,7 @@
         </div>
 
         <div class="spotify-actions">
-          <button type="button" class="btn-primary" @click="saveVoiceControl">
+          <button type="button" class="btn-primary" :disabled="ttsOptionsLoading" @click="saveVoiceControl">
             {{ voiceControlSaving ? '保存中…' : '保存' }}
           </button>
         </div>
@@ -2180,6 +2227,7 @@ interface VoiceControlSettings {
   enabled: boolean;
   wakeWord: string;
   kwsDir: string;
+  endOfSpeechMs: number;
   asrBaseUrl: string;
   asrModel: string;
   llmBaseUrl: string;
@@ -2196,6 +2244,7 @@ const voiceControlForm = reactive({
   enabled: false,
   wakeWord: '',
   kwsDir: '',
+  endOfSpeechMs: 650,
   asrBaseUrl: '',
   asrModel: '',
   asrApiKey: '',
@@ -2217,6 +2266,48 @@ const voiceControlLoaded = ref(false);
 const voiceControlSaving = ref(false);
 const voiceControlMessage = ref('');
 const voiceControlMessageTone = ref<'ok' | 'warn'>('ok');
+type TtsModelOption = { id: string; voices: string[] };
+const ttsModelOptions = ref<TtsModelOption[]>([]);
+const ttsVoiceOptions = computed(() =>
+  ttsModelOptions.value.find(model => model.id === voiceControlForm.ttsModel)?.voices ?? [],
+);
+const ttsManual = ref(false);
+const ttsOptionsLoading = ref(false);
+const ttsOptionsMessage = ref('');
+
+watch(() => [
+  voiceControlForm.ttsBaseUrl || voiceControlForm.asrBaseUrl,
+  voiceControlForm.ttsApiKey,
+  voiceControlForm.asrApiKey,
+  voiceControlClearTtsKey.value,
+  voiceControlClearAsrKey.value,
+], () => {
+  ttsModelOptions.value = [];
+  ttsOptionsMessage.value = '';
+});
+
+async function loadTtsOptions() {
+  ttsOptionsLoading.value = true;
+  ttsOptionsMessage.value = '';
+  try {
+    const { data } = await axios.get<{ models: TtsModelOption[] }>('/api/bot/settings/voice-control/tts-options');
+    ttsModelOptions.value = data.models;
+    ttsManual.value = false;
+    if (!data.models.length) ttsOptionsMessage.value = '服务未返回已知的 OpenAI 合成模型。可手动填写服务商提供的模型和音色。';
+  } catch (err) {
+    ttsModelOptions.value = [];
+    ttsOptionsMessage.value = (axios.isAxiosError<{ error: string }>(err) && err.response?.data.error)
+      || '获取 TTS 模型和音色失败。';
+  } finally {
+    ttsOptionsLoading.value = false;
+  }
+}
+
+function selectTtsModel(event: Event) {
+  voiceControlForm.ttsModel = (event.target as HTMLSelectElement).value;
+  const voices = ttsVoiceOptions.value;
+  if (voices.length && !voices.includes(voiceControlForm.ttsVoice)) voiceControlForm.ttsVoice = 'alloy';
+}
 
 function applyVoiceControlConfig({ hasAsrApiKey, hasLlmApiKey, hasTtsApiKey, ...settings }: VoiceControlSettings) {
   Object.assign(voiceControlForm, settings, { asrApiKey: '', llmApiKey: '', ttsApiKey: '' });

@@ -15,6 +15,7 @@ export interface VoiceControlConfig {
   enabled: boolean;
   wakeWord: string;
   kwsDir: string;
+  endOfSpeechMs: number;
   asrBaseUrl: string;
   asrModel: string;
   asrApiKey: string;
@@ -195,6 +196,7 @@ export function getDefaultConfig(): BotConfig {
       enabled: false,
       wakeWord: "团子",
       kwsDir: process.env.VOICE_KWS_DIR ?? "data/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01",
+      endOfSpeechMs: 650,
       asrBaseUrl: "https://api.openai.com/v1",
       asrModel: "gpt-transcribe",
       asrApiKey: "",

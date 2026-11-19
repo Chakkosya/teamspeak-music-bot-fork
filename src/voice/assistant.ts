@@ -1,5 +1,6 @@
 import type { ParsedCommand } from "../bot/commands.js";
 import type { VoiceControlConfig } from "../data/config.js";
+import { PlayMode } from "../audio/queue.js";
 import { decodeSpeech } from "../audio/speech.js";
 import { loadWakeDetector, VOICE_BYTES_PER_SECOND, VOICE_SAMPLE_RATE, type WakeDetector } from "./keyword.js";
 
@@ -10,9 +11,22 @@ interface ModelEndpoint {
 }
 
 interface VoiceReply {
-  command: ParsedCommand | null;
+  command: (ParsedCommand & { volumeDelta?: number }) | null;
   text: string;
 }
+
+// https://developers.openai.com/api/docs/guides/text-to-speech#voice-options
+const legacySpeechVoices = ["alloy", "ash", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer"];
+const miniSpeechVoices = [...legacySpeechVoices, "ballad", "cedar", "marin", "verse"].sort();
+
+const playbackActions = new Map([
+  ["pause", "暂停播放，保留队列。用户说「停止播放」且没有要求清空时也用此工具。"],
+  ["resume", "继续或恢复播放。"],
+  ["prev", "切换到上一首。"],
+  ["next", "切换到下一首。"],
+  ["stop", "停止播放并清空队列。仅在用户明确要求停止并清空时调用。"],
+]);
+const playModes: string[] = Object.values(PlayMode);
 
 const tools = [
   {
@@ -23,16 +37,53 @@ const tools = [
       parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"], additionalProperties: false },
     },
   },
-  ...[
-    ["pause", "暂停当前播放。"],
-    ["next", "切换到下一首。"],
-  ].map(([name, description]) => ({
+  ...Array.from(playbackActions, ([name, description]) => ({
     type: "function",
     function: { name, description, parameters: { type: "object", properties: {}, additionalProperties: false } },
   })),
+  {
+    type: "function",
+    function: {
+      name: "set_volume",
+      description: "把播放音量设到指定百分比。例如「音量调到六十」用 60，「静音」用 0。",
+      parameters: {
+        type: "object",
+        properties: { percent: { type: "integer", minimum: 0, maximum: 100 } },
+        required: ["percent"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "adjust_volume",
+      description: "在当前音量上增加或减少百分点。「调大一点」用 10，「小声一点」用 -10。用户指定幅度时用指定值。",
+      parameters: {
+        type: "object",
+        properties: { delta: { type: "integer", minimum: -100, maximum: 100 } },
+        required: ["delta"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "set_play_mode",
+      description: "切换播放模式。seq 是顺序播放，loop 是列表循环，random 是随机播放，rloop 是随机循环。",
+      parameters: {
+        type: "object",
+        properties: { mode: { type: "string", enum: playModes } },
+        required: ["mode"],
+        additionalProperties: false,
+      },
+    },
+  },
 ];
 
 export interface VoiceAssistant {
+  endOfSpeechMs: number;
   newWakeDetector: () => WakeDetector;
   transcribe(pcm: Buffer, signal: AbortSignal): Promise<string>;
   reply(text: string, signal: AbortSignal): Promise<VoiceReply>;
@@ -45,6 +96,7 @@ export function createVoiceAssistant(config: VoiceControlConfig): VoiceAssistant
   const llm = toolsEndpoint(config);
   const tts = config.ttsModel ? speechEndpoint(config) : undefined;
   return {
+    endOfSpeechMs: config.endOfSpeechMs,
     newWakeDetector: loadWakeDetector(config.kwsDir, config.wakeWord),
     transcribe: (pcm, signal) => transcribeAudio(asr, wav(pcm), signal),
     reply: (text, signal) => getVoiceReply(llm, text, signal),
@@ -71,6 +123,17 @@ export function speechEndpoint(config: VoiceControlConfig) {
     ...sharedEndpoint(config.asrBaseUrl, config.asrApiKey, config.ttsBaseUrl, config.ttsModel, config.ttsApiKey),
     voice: config.ttsVoice || "alloy",
   };
+}
+
+export async function listSpeechOptions(config: VoiceControlConfig, signal: AbortSignal) {
+  const list = await request(speechEndpoint(config), "/models", undefined, signal, json<{ data: { id: string }[] }>);
+  if (!Array.isArray(list?.data)) throw new Error("服务未返回模型列表。");
+
+  return list.data.flatMap(({ id }) => {
+    if (/^gpt-4o-mini-tts(?:-\d{4}-\d{2}-\d{2})?$/.test(id)) return [{ id, voices: miniSpeechVoices }];
+    if (/^tts-1(?:-hd)?(?:-\d{4})?$/.test(id)) return [{ id, voices: legacySpeechVoices }];
+    return [];
+  }).sort((a, b) => a.id.localeCompare(b.id));
 }
 
 function sharedEndpoint(asrBaseUrl: string, asrKey: string, url: string, model: string, apiKey: string): ModelEndpoint {
@@ -115,19 +178,44 @@ export async function getVoiceReply(llm: ModelEndpoint, text: string, signal: Ab
   return { command: calls.length === 1 ? parseAction(calls[0].function) : null, text: "" };
 }
 
-function parseAction(action: { name: string; arguments: string }): ParsedCommand | null {
-  if (action.name === "pause" || action.name === "next") {
-    return { name: action.name, args: "", rawArgs: [], flags: new Set() };
-  }
-  if (action.name !== "play") return null;
-  let parameters: { query?: unknown } | null;
+function parseAction(action: { name: string; arguments: string }): VoiceReply["command"] {
+  if (playbackActions.has(action.name)) return voiceCommand(action.name);
+  if (!tools.some(tool => tool.function.name === action.name)) return null;
+
+  let parameters: { query?: unknown; percent?: unknown; delta?: unknown; mode?: unknown } | null;
   try {
     parameters = JSON.parse(action.arguments);
   } catch {
     throw new Error("LLM 返回了无法解析的工具参数。");
   }
-  const query = typeof parameters?.query === "string" ? parameters.query.trim() : "";
-  return query ? { name: "play", args: query, rawArgs: query.split(/\s+/), flags: new Set() } : null;
+  switch (action.name) {
+    case "play": {
+      const query = typeof parameters?.query === "string" ? parameters.query.trim() : "";
+      return query ? voiceCommand("play", query) : null;
+    }
+    case "set_volume": {
+      const percent = parameters?.percent;
+      return isIntegerInRange(percent, 0, 100) ? voiceCommand("vol", String(percent)) : null;
+    }
+    case "adjust_volume": {
+      const delta = parameters?.delta;
+      return isIntegerInRange(delta, -100, 100) ? { ...voiceCommand("vol"), volumeDelta: delta } : null;
+    }
+    case "set_play_mode": {
+      const mode = parameters?.mode;
+      return typeof mode === "string" && playModes.includes(mode) ? voiceCommand("mode", mode) : null;
+    }
+    default:
+      return null;
+  }
+}
+
+function voiceCommand(name: string, args = ""): ParsedCommand {
+  return { name, args, rawArgs: args ? args.split(/\s+/) : [], flags: new Set() };
+}
+
+function isIntegerInRange(value: unknown, min: number, max: number): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= min && value <= max;
 }
 
 export async function synthesizeSpeech(
@@ -151,7 +239,8 @@ async function json<T>(response: Response): Promise<T> {
 }
 
 async function request<T>(
-  endpoint: ModelEndpoint, path: string, body: FormData | string, signal: AbortSignal, read: (response: Response) => Promise<T>,
+  endpoint: ModelEndpoint, path: string, body: FormData | string | undefined,
+  signal: AbortSignal, read: (response: Response) => Promise<T>,
 ): Promise<T> {
   const headers = new Headers();
   if (endpoint.apiKey) headers.set("Authorization", `Bearer ${endpoint.apiKey}`);
@@ -160,7 +249,7 @@ async function request<T>(
   let response: Response;
   try {
     response = await fetch(`${endpoint.baseUrl}${path}`, {
-      method: "POST",
+      method: body === undefined ? "GET" : "POST",
       headers,
       body,
       signal: AbortSignal.any([signal, timeout]),
@@ -171,7 +260,7 @@ async function request<T>(
   }
   if (!response.ok) {
     const hints: Record<number, string> = {
-      400: "请检查模型名和接口格式。",
+      400: path === "/audio/speech" ? "请检查 TTS 模型、音色和合成文本。" : "请检查模型名和接口格式。",
       401: "请检查 API Key。",
       403: "请检查 API Key 和模型权限。",
       404: "请检查 API 根地址和模型名。",

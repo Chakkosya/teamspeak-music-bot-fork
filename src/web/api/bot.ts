@@ -8,7 +8,7 @@ import type { AvatarStore } from "../../data/avatars.js";
 import { requirePermission, requireBotAccess } from "../middleware/requirePermission.js";
 import { requireNotGuest } from "../middleware/requireNotGuest.js";
 import { GUEST_PERMISSION_FLAGS } from "../../data/permissions.js";
-import { createVoiceAssistant, type VoiceAssistant } from "../../voice/assistant.js";
+import { createVoiceAssistant, listSpeechOptions, type VoiceAssistant } from "../../voice/assistant.js";
 import { testVoiceControl } from "../../voice/diagnostic.js";
 
 export function createBotRouter(
@@ -81,6 +81,17 @@ export function createBotRouter(
     res.json(voiceControlView());
   });
 
+  router.get("/settings/voice-control/tts-options", requirePermission("bot.manage"), async (_req, res) => {
+    const controller = new AbortController();
+    res.once("close", () => controller.abort());
+    try {
+      const models = await listSpeechOptions(config.voiceControl, controller.signal);
+      if (!controller.signal.aborted) res.json({ models });
+    } catch (err) {
+      if (!controller.signal.aborted) res.status(502).json({ error: (err as Error).message });
+    }
+  });
+
   router.post("/settings/voice-control/test", requirePermission("bot.manage"), async (_req, res) => {
     const controller = new AbortController();
     res.once("close", () => controller.abort());
@@ -93,6 +104,14 @@ export function createBotRouter(
     const next = { ...previous };
     const body = req.body ?? {};
     if (typeof body.enabled === "boolean") next.enabled = body.enabled;
+    const { endOfSpeechMs } = body;
+    if (endOfSpeechMs !== undefined) {
+      if (!Number.isInteger(endOfSpeechMs) || endOfSpeechMs < 200 || endOfSpeechMs > 5000) {
+        res.status(400).json({ error: "停顿时间须为 200 到 5000 毫秒之间的整数。" });
+        return;
+      }
+      next.endOfSpeechMs = endOfSpeechMs;
+    }
     for (const field of [
       "wakeWord", "kwsDir", "asrBaseUrl", "asrModel", "llmBaseUrl", "llmModel", "ttsBaseUrl", "ttsModel", "ttsVoice",
     ] as const) {

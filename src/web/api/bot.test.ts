@@ -126,6 +126,21 @@ describe("bot router /settings", () => {
     });
   });
 
+  it("stores the voice capture delay and rejects values outside the available range", async () => {
+    const endpoint = "/api/bot/settings/voice-control";
+    const defaults = await request(app).get(endpoint).set("Cookie", cookie);
+    expect(defaults.body.endOfSpeechMs).toBe(650);
+
+    const saved = await request(app).post(endpoint).set("Cookie", cookie).send({ endOfSpeechMs: 1200 });
+    expect(saved.status).toBe(200);
+    expect(saved.body.endOfSpeechMs).toBe(1200);
+
+    const invalid = await request(app).post(endpoint).set("Cookie", cookie).send({ endOfSpeechMs: 0 });
+    expect(invalid.status).toBe(400);
+    expect(config.voiceControl.endOfSpeechMs).toBe(1200);
+    expect(loadConfig(configPath).voiceControl.endOfSpeechMs).toBe(1200);
+  });
+
   it("keeps the previous configuration when enabling with a missing local model", async () => {
     const endpoint = "/api/bot/settings/voice-control";
     const res = await request(app).post(endpoint).set("Cookie", cookie).send({
@@ -161,6 +176,34 @@ describe("bot router /settings", () => {
     expect(removedLlm.status).toBe(200);
     expect(removedLlm.body).toMatchObject({ hasAsrApiKey: false, hasLlmApiKey: false, hasTtsApiKey: false });
     expect(loadConfig(configPath).voiceControl).toMatchObject({ llmApiKey: "", ttsApiKey: "" });
+  });
+
+  it.each([
+    { ttsBaseUrl: "", ttsApiKey: "", url: "https://asr.example/v1/models", key: "asr-key" },
+    { ttsBaseUrl: "https://tts.example/v1", ttsApiKey: "tts-key", url: "https://tts.example/v1/models", key: "tts-key" },
+  ])("lists the speech models and their built-in voices from $url", async ({ ttsBaseUrl, ttsApiKey, url, key }) => {
+    Object.assign(config.voiceControl, { asrBaseUrl: "https://asr.example/v1", asrApiKey: "asr-key", ttsBaseUrl, ttsApiKey });
+    const fetchModels = vi.fn().mockResolvedValue(Response.json({
+      data: ["tts-1-hd", "gpt-transcribe", "gpt-realtime-2.1-mini", "gpt-4o-mini-tts-2025-12-15"].map(id => ({ id })),
+    }));
+    vi.stubGlobal("fetch", fetchModels);
+    try {
+      const res = await request(app).get("/api/bot/settings/voice-control/tts-options").set("Cookie", cookie);
+      expect(res.status).toBe(200);
+      expect(fetchModels).toHaveBeenCalledExactlyOnceWith(url, expect.objectContaining({
+        method: "GET",
+        headers: new Headers({ Authorization: `Bearer ${key}` }),
+      }));
+      const [mini, legacy] = res.body.models;
+      expect(res.body.models.map(({ id }: { id: string }) => id)).toEqual(["gpt-4o-mini-tts-2025-12-15", "tts-1-hd"]);
+      expect(mini.voices).toHaveLength(13);
+      expect(mini.voices).toContain("marin");
+      expect(legacy.voices).toHaveLength(9);
+      expect(legacy.voices).toContain("coral");
+      expect(legacy.voices).not.toContain("marin");
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("tests the saved TTS provider and keeps its key out of settings responses", async () => {

@@ -278,7 +278,10 @@ describe("BotInstance voice-ducking lifecycle integration", () => {
 });
 
 describe("BotInstance voice commands", () => {
-  const { handleVoiceCommand, isCommandAllowed } = BotInstance.prototype as any;
+  const {
+    handleVoiceCommand, isCommandAllowed, lookupInvokerGroups,
+    cmdVol, cmdMode, persistVolume, persistPlayMode,
+  } = BotInstance.prototype as any;
   const command = parseCommand("!next", "!")!;
   const speaker = { clientId: 7, nickname: "频道成员" };
 
@@ -305,6 +308,48 @@ describe("BotInstance voice commands", () => {
     expect(bot.tsClient.sendTextMessage.mock.calls).toEqual([["听到：下一首"], ["已切换到下一首"]]);
     expect(assistant.synthesize).toHaveBeenCalledExactlyOnceWith("已切换到下一首", signal);
     expect(bot.player.playSpeech).toHaveBeenCalledExactlyOnceWith(audio, signal);
+  });
+
+  it.each([true, false])("applies and saves volume and mode only with the configured group: %s", async (allowed) => {
+    let volume = 95;
+    const bot = {
+      id: "voice-test",
+      connected: true,
+      config: { adminGroups: [6] },
+      isCommandAllowed, lookupInvokerGroups, cmdVol, cmdMode, persistVolume, persistPlayMode,
+      executeCommand: BotInstance.prototype.executeCommand,
+      queue: new PlayQueue(),
+      player: { getVolume: () => volume, setVolume: (value: number) => { volume = value; } },
+      database: { saveVolume: vi.fn(), savePlayMode: vi.fn() },
+      emit: vi.fn(),
+      tsClient: {
+        sendTextMessage: vi.fn(),
+        getClientServerGroups: vi.fn(async () => allowed ? ["6"] : ["9"]),
+      },
+    };
+    const signal = new AbortController().signal;
+    const audio = Buffer.alloc(640);
+    await handleVoiceCommand.call(bot, {
+      transcribe: async () => "调大一点",
+      reply: async () => ({ command: { ...parseCommand("!vol", "!")!, volumeDelta: 10 }, text: "" }),
+    }, speaker, audio, signal);
+    await handleVoiceCommand.call(bot, {
+      transcribe: async () => "改成随机播放",
+      reply: async () => ({ command: parseCommand("!mode random", "!"), text: "" }),
+    }, speaker, audio, signal);
+    expect(bot.tsClient.getClientServerGroups.mock.calls).toEqual([[7], [7]]);
+    if (allowed) {
+      expect(volume).toBe(100);
+      expect(bot.queue.getMode()).toBe(PlayMode.Random);
+      expect(bot.database.saveVolume).toHaveBeenCalledExactlyOnceWith(bot.id, 100);
+      expect(bot.database.savePlayMode).toHaveBeenCalledExactlyOnceWith(bot.id, PlayMode.Random);
+    } else {
+      expect(volume).toBe(95);
+      expect(bot.queue.getMode()).toBe(PlayMode.Sequential);
+      expect(bot.database.saveVolume).not.toHaveBeenCalled();
+      expect(bot.database.savePlayMode).not.toHaveBeenCalled();
+      expect(bot.tsClient.sendTextMessage).toHaveBeenLastCalledWith(COMMAND_DENIED_MESSAGE);
+    }
   });
 
   it.each([true, false])("speaks the LLM's text with channel text permission: %s", async (canSendText) => {
